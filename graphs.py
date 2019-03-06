@@ -1,0 +1,213 @@
+import collections
+import numpy as np
+
+import tensorflow as tf
+import tensorflow_probability as tfp
+from tensorflow_probability import edward2 as ed
+
+import util
+import program_transformations as ed_transforms
+
+
+FLAGS = tf.app.flags.FLAGS
+
+
+def make_cp_graph(model_config):
+	""" 
+		Constructs the CP graph of the given model.
+		Resets the default TF graph.
+	"""
+
+	tf.reset_default_graph()
+
+	log_joint_centered = ed.make_log_joint_fn(model_config.model)
+
+	with ed.tape() as model_tape:
+		_ = model_config.model(*model_config.model_args)
+
+	param_shapes = collections.OrderedDict()
+	target_cp_kwargs = {}
+	for param in model_tape.keys():
+		if param not in model_config.observed_data.keys():
+			param_shapes[param] = model_tape[param].shape
+		else:
+			target_cp_kwargs[param] = model_config.observed_data[param]
+
+			
+	def target_cp(*param_args):
+		i = 0
+		for param in model_tape.keys():
+			if param not in model_config.observed_data.keys():
+				target_cp_kwargs[param] = param_args[i]
+				i = i + 1
+
+		return log_joint_centered(*model_config.model_args, **target_cp_kwargs)
+
+		
+	elbo, variational_parameters = util.get_mean_field_elbo( 
+		model_config.model,
+		target_cp,
+		num_mc_samples=FLAGS.num_mc_samples,
+		model_args=model_config.model_args,
+		model_obs_kwargs=model_config.observed_data,
+		vi_kwargs=None)
+
+	return target_cp, model_config.model, elbo, variational_parameters, None
+	
+	
+def make_ncp_graph(model_config):
+	""" 
+		Constructs the CP graph of the given model. 
+		Resets the default TF graph.
+	"""
+	tf.reset_default_graph()
+
+	interceptor=ed_transforms.ncp
+
+	def model_ncp(*params):
+		with ed.interception(interceptor):
+			return model_config.model(*params)
+
+	log_joint_noncentered = ed.make_log_joint_fn(model_ncp)
+
+	with ed.tape() as model_tape:
+		_ = model_ncp(*model_config.model_args)
+
+	param_shapes = collections.OrderedDict()
+	target_ncp_kwargs = {}
+	for param in model_tape.keys():
+		if param not in model_config.observed_data.keys():
+			param_shapes[param] = model_tape[param].shape
+		else:
+			target_ncp_kwargs[param] = model_config.observed_data[param]
+
+	def target_ncp(*param_args):
+		i = 0
+		for param in model_tape.keys():
+			if param not in model_config.observed_data.keys():
+				target_ncp_kwargs[param] = param_args[i]
+				i = i + 1
+
+		return log_joint_noncentered(*model_config.model_args, **target_ncp_kwargs)
+
+
+	elbo, variational_parameters = util.get_mean_field_elbo( 
+			model_config.model,
+			target_ncp,
+			num_mc_samples=FLAGS.num_mc_samples,
+			model_args=model_config.model_args,
+			model_obs_kwargs=model_config.observed_data,
+			vi_kwargs=None)
+
+	return target_ncp, model_ncp, elbo, variational_parameters, None
+	
+
+def make_cvip_graph(model_config, parameterisation_type='exp'):
+	""" 
+		Constructs the cVIP graph of the given model. 
+		Resets the default TF graph.
+	"""
+	
+	tf.reset_default_graph()
+
+	results = collections.OrderedDict()
+
+	(
+		learnable_parameters,
+		learnable_parametrisation, 
+		_
+	) = ed_transforms.make_learnable_parametrisation(
+				tau=1., parameterisation_type=parameterisation_type)
+
+	def model_vip(*params):
+		with ed.interception(learnable_parametrisation):
+			return model_config.model(*params)
+
+	log_joint_vip = ed.make_log_joint_fn(model_vip) # log_joint_fn
+
+	with ed.tape() as model_tape:
+		_ = model_vip(*model_config.model_args)
+
+	param_shapes = collections.OrderedDict()
+	target_vip_kwargs = {}
+	for param in model_tape.keys():
+		if param not in model_config.observed_data.keys():
+			param_shapes[param] = model_tape[param].shape
+		else:
+			target_vip_kwargs[param] = model_config.observed_data[param]
+
+	def target_vip(*param_args): # latent_log_joint_fn
+		i = 0
+		for param in model_tape.keys():
+			if param not in model_config.observed_data.keys():
+				target_vip_kwargs[param] = param_args[i]
+				i = i + 1
+		return log_joint_vip(*model_config.model_args, **target_vip_kwargs)
+
+	#full_kwargs = collections.OrderedDict(model_config.observed_data.items())
+	#full_kwargs['parameterisation'] = collections.OrderedDict()
+	#for k in learnable_parameters.keys():
+	#	full_kwargs['parameterisation'][k] = learnable_parameters[k]
+
+
+	elbo, variational_parameters = util.get_mean_field_elbo(
+			model_vip,
+			target_vip,
+			num_mc_samples=FLAGS.num_mc_samples,
+			model_args=model_config.model_args,
+			model_obs_kwargs=model_config.observed_data,
+			vi_kwargs={'parameterisation':learnable_parameters}) #vi_kwargs=full_kwargs
+
+	return target_vip, model_vip, elbo, variational_parameters, learnable_parameters
+	
+	
+def make_dvip_graph(model_config, reparam, parameterisation_type='exp'):
+	""" 
+		Constructs the dVIP graph of the given model, where `reparam` is a cVIP 
+		reparameterisation obtained previously. 
+		Resets the default TF graph.
+	"""
+	
+	tf.reset_default_graph()
+
+	results = collections.OrderedDict()
+
+	_, insightful_parametrisation, _ = ed_transforms.make_learnable_parametrisation(
+			 learnable_parameters=reparam, 
+			 parameterisation_type=parameterisation_type)
+
+
+	def model_vip(*params):
+		with ed.interception(insightful_parametrisation):
+			return model_config.model(*params)
+
+	log_joint_vip = ed.make_log_joint_fn(model_vip) # log_joint_fn
+
+	with ed.tape() as model_tape:
+		_ = model_vip(*model_config.model_args)
+
+	param_shapes = collections.OrderedDict()
+	target_vip_kwargs = {}
+	for param in model_tape.keys():
+		if param not in model_config.observed_data.keys():
+			param_shapes[param] = model_tape[param].shape
+		else:
+			target_vip_kwargs[param] = model_config.observed_data[param]
+
+	def target_vip(*param_args): # latent_log_joint_fn
+		i = 0
+		for param in model_tape.keys():
+			if param not in model_config.observed_data.keys():
+				target_vip_kwargs[param] = param_args[i]
+				i = i + 1
+		return log_joint_vip(*model_config.model_args, **target_vip_kwargs)
+
+	elbo, variational_parameters = util.get_mean_field_elbo(
+			model_vip,
+			target_vip,
+			num_mc_samples=FLAGS.num_mc_samples,
+			model_args=model_config.model_args,
+			model_obs_kwargs=model_config.observed_data,
+			vi_kwargs={'parameterisation': reparam})
+
+	return target_vip, model_vip, elbo, variational_parameters, None
