@@ -25,3 +25,7 @@ python analyze.py --elbos --all
 python analyze.py --reparams --all
 python analyze.py --elbos --model=8schools
 ```
+
+The number of leapfrog steps will be automatically tuned if (1) no `num_leapfrog_steps` argument is supplied and (2) no entry `num_leapfrog_steps` exists in the respective `.json` file. 
+
+When the number of leapfrog steps is tuned, the best number of leapfrog steps is recorded in a `.json` file, so that it can be reused accordingly.
