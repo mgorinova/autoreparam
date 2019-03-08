@@ -101,6 +101,64 @@ def vectorize_log_joint_fn(log_joint_fn):
   return vectorized_log_joint_fn
 
 
+# Copied from tfp.mcmc.util
+def is_list_like(x):
+  """Helper which returns `True` if input is `list`-like."""
+  return isinstance(x, (tuple, list))
+
+def make_per_chain_step_size_update_policy(num_adaptation_steps,
+																					target_rate=0.75,
+																					decrement_multiplier=0.01,
+																					increment_multiplier=0.01,
+																					step_counter=None):
+	if step_counter is None and num_adaptation_steps is not None:
+		step_counter = tf.compat.v1.get_variable(
+				name='step_size_adaptation_step_counter',
+				initializer=np.array(-1, dtype=np.int64),
+				# Specify the dtype for variable sharing to work correctly
+				# (b/120599991).
+				dtype=tf.int64,
+				trainable=False,
+				use_resource=True)
+
+	def step_size_simple_update_fn(step_size_var, kernel_results):
+		if kernel_results is None:
+			if is_list_like(step_size_var):
+				return [tf.identity(ss) for ss in step_size_var]
+			return tf.identity(step_size_var)
+		
+		decrement_locs = kernel_results.log_accept_ratio < tf.cast(
+						tf.math.log(target_rate), kernel_results.log_accept_ratio.dtype)
+		broadcast_ones = tf.ones_like(kernel_results.log_accept_ratio)
+		adjustment = tf.where(
+				decrement_locs,
+				-decrement_multiplier / (1. + decrement_multiplier) * broadcast_ones,
+				increment_multiplier * broadcast_ones)
+		def assign_step_size_var(step_size_var):
+			needed_dims = tf.range(tf.rank(adjustment) - tf.rank(step_size_var), 0)
+								
+			expanded = tf.expand_dims(adjustment, needed_dims) if needed_dims.shape != (0,) \
+				else adjustment
+			
+			broadcasted_adjustment = tf.cast(expanded, step_size_var.dtype)
+			return step_size_var.assign_add(step_size_var * broadcasted_adjustment)
+			
+		def build_assign_op():
+			if is_list_like(step_size_var):
+				return [assign_step_size_var(ss) for ss in step_size_var]
+			return assign_step_size_var(step_size_var)
+
+		if num_adaptation_steps is None:
+			return build_assign_op()
+		else:
+			with tf.control_dependencies([step_counter.assign_add(1)]):
+				return tf.cond(
+						pred=step_counter < num_adaptation_steps,
+						true_fn=build_assign_op,
+						false_fn=lambda: step_size_var)
+
+	return step_size_simple_update_fn
+	
 def hmc(target, model, model_config, step_size_init, reparam=None):
 	"""Runs HMC to sample from the given target distribution."""
 	if reparam is not None:  
@@ -116,18 +174,22 @@ def hmc(target, model, model_config, step_size_init, reparam=None):
 	model_config = model_config._replace(to_centered=to_centered)
 
 	initial_states = [value for (param, value) in \
-										vectorized_sample(model, model_config.model_args,
-										num_samples=FLAGS.num_chains).items() if \
-										param not in model_config.observed_data.keys()]
+			vectorized_sample(model, model_config.model_args,
+			num_samples=FLAGS.num_chains).items() if \
+			param not in model_config.observed_data.keys()]
 
 
 	initial_states = list(initial_states)
 
+	shapes = [s[0].shape for s in initial_states]
+	
 	vectorized_target = vectorize_log_joint_fn(target)
 
+	#FIXME: possibly initialise at a variational sample rather than the prior?
+	
 	v_step_size = [tf.get_variable(
 			name='step_size'+str(i),
-			initializer= np.array(step_size_init[i], 
+			initializer= np.array(np.ones(shape=(FLAGS.num_chains, *shapes[i])) * step_size_init[i], 
 			dtype=np.float32) / np.float32((FLAGS.num_leapfrog_steps / 4.)**2),
 			use_resource=True,  # For TFE compatibility.
 			trainable=False) for i in range(len(step_size_init))]
@@ -136,7 +198,7 @@ def hmc(target, model, model_config, step_size_init, reparam=None):
 			target_log_prob_fn=vectorized_target,
 			step_size=v_step_size,
 			num_leapfrog_steps=FLAGS.num_leapfrog_steps,
-			step_size_update_fn=mcmc.make_simple_step_size_update_policy(
+			step_size_update_fn=make_per_chain_step_size_update_policy(
 					num_adaptation_steps=FLAGS.num_adaptation_steps, target_rate=0.75))
 
 	states_orig, kernel_results = mcmc.sample_chain(
@@ -146,26 +208,8 @@ def hmc(target, model, model_config, step_size_init, reparam=None):
 			kernel=kernel,
 			num_steps_between_results=1)
 				
-	shapes = [s[0][0].shape for s in states_orig]
-	#states_reshaped = [
-	#	tf.reshape(
-	#		states_orig[i], [FLAGS.num_chains*FLAGS.num_samples, *shapes[i]]
-	#	) for i in range(len(states_orig))
-	#]
 
-	states_transformed = transform_mcmc_states(states_orig, to_centered)#states_reshaped, to_centered) 
-
-	#states_transformed_reshaped = [
-	#	tf.reshape(
-	#		states_transformed[i], [FLAGS.num_samples, FLAGS.num_chains, *shapes[i]]
-	#	) for i in range(len(states_transformed))
-	#]
-
-	#ess = []
-	#for c in range(FLAGS.num_chains):
-	#	this_chain = [s[:,c] for s in states_transformed]
-	#	ess.append(tfp.mcmc.effective_sample_size(this_chain))
-	
+	states_transformed = transform_mcmc_states(states_orig, to_centered)
 	ess = tfp.mcmc.effective_sample_size(states_transformed) 
 
 	return states_orig, kernel_results, states_transformed, ess

@@ -188,7 +188,7 @@ def tune_leapfrog_steps(model_config, initial_step_size, learned_reparam, result
 	
 def main(_):
 
-	tf.logging.set_verbosity(tf.logging.ERROR)
+	#tf.logging.set_verbosity(tf.logging.ERROR)
 	np.warnings.filterwarnings('ignore')
 
 	util.print('Loading model {} with dataset {}.'.format(
@@ -395,17 +395,26 @@ def main(_):
 		
 		results = prev_results
 
-		if 'ess_min' not in results.keys():
-			results['ess_min'] = []
-			results['sem_min'] = []
-			results['acceptance_rate'] = []
-			results['mcmc_time_sec'] = []
+		
+		def init_results(list):
+			for l in list:
+				if l not in results.keys():
+					results[l] = []
+					
+		init_results(['ess_min', 'sem_min', 'acceptance_rate',
+									'mcmc_time_sec', 
+									#'step_size',
+								 ])
 
 		results.get('ess_min', []).append(ess_min.item())
 		results.get('sem_min', []).append(sem_min.item())
+		
+		util.print("ESS: {} +/- {}".format(ess_min, sem_min))
+		
 		results.get('acceptance_rate', []).append(
 				(np.sum(is_accepted) * 100. / float(FLAGS.num_samples * FLAGS.num_chains)).item())
-
+		#results.get('step_size', []).append([s[-1].tolist() for s in step_size])
+		
 		results.get('mcmc_time_sec', []).append(mcmc_time)
 
 		with open(file_path, 'w') as outfile:

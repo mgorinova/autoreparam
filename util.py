@@ -423,11 +423,10 @@ def get_min_ess(ess):
 	min_ess = []
 	for c in range(FLAGS.num_chains):
 		min_ess_c = min([np.array(e[c]).min() for e in ess])
-		print("   Min ess of chain {} is {}.".format(c, min_ess_c))
 		min_ess.append(min_ess_c)
 	
-	min_ess = reject_outliers(np.array(min_ess))	
-	print("   Filtred {} outliers.".format(FLAGS.num_chains - len(min_ess)))
+	# min_ess = reject_outliers(np.array(min_ess))	
+	# print("   Filtred {} outliers.".format(FLAGS.num_chains - len(min_ess)))
 	
 	mean_ess = np.mean(min_ess)
 	sem_ess = np.std(min_ess) / np.sqrt(len(min_ess))
