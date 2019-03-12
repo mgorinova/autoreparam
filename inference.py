@@ -11,6 +11,8 @@ import interleaved
 from tensorflow_probability.python import mcmc
 from tensorflow.python.ops.parallel_for import pfor
 
+from tensorflow.python.framework import smart_cond
+
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -134,6 +136,20 @@ def make_per_chain_step_size_update_policy(num_adaptation_steps,
 				decrement_locs,
 				-decrement_multiplier / (1. + decrement_multiplier) * broadcast_ones,
 				increment_multiplier * broadcast_ones)
+				
+		def assign_step_size_var(step_size_var):
+			adjustment_rank, step_size_rank = tf.rank(adjustment), tf.rank(step_size_var)
+			# `expand_dims` breaks on zero-length `dims`, so avoid calling it if we
+			# don't actually need to add any broadcasting dims.
+			broadcasted_adjustment = smart_cond.smart_cond(
+				adjustment_rank < step_size_rank,
+				lambda : tf.expand_dims(adjustment,
+																tf.range(adjustment_rank - step_size_rank, 0)),
+				lambda : adjustment)
+			return step_size_var.assign_add(step_size_var * tf.cast(
+				broadcasted_adjustment, step_size_var.dtype))
+				
+		'''
 		def assign_step_size_var(step_size_var):
 			needed_dims = tf.range(tf.rank(adjustment) - tf.rank(step_size_var), 0)
 								
@@ -142,7 +158,8 @@ def make_per_chain_step_size_update_policy(num_adaptation_steps,
 			
 			broadcasted_adjustment = tf.cast(expanded, step_size_var.dtype)
 			return step_size_var.assign_add(step_size_var * broadcasted_adjustment)
-			
+		'''
+
 		def build_assign_op():
 			if is_list_like(step_size_var):
 				return [assign_step_size_var(ss) for ss in step_size_var]
