@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Interleaving Transition Kernel."""
 # pylint: disable=missing-docstring
 
@@ -28,11 +27,9 @@ import tensorflow_probability as tfp
 
 from tensorflow_probability.python.mcmc import TransitionKernel
 
-
 __all__ = [
     'Interleaved',
 ]
-
 
 # Cause all warnings to always be triggered.
 # Not having this means subsequent calls wont trigger the warning.
@@ -40,12 +37,7 @@ warnings.simplefilter('always')
 
 InterleavedKernelResults = collections.namedtuple(
     'InterleavedKernelResults',
-    [
-        'accepted_results',
-        'is_accepted',
-        'log_accept_ratios',
-        'extras'
-    ])
+    ['accepted_results', 'is_accepted', 'log_accept_ratios', 'extras'])
 
 
 def noop(state):
@@ -62,11 +54,16 @@ def make_name(super_name, default_super_name, sub_name):
 
 class Interleaved(TransitionKernel):
 
-  def __init__(self, inner_kernel_cp, inner_kernel_ncp,
-               to_cp=noop, to_ncp=noop, seed=None, name=None):
+  def __init__(self,
+               inner_kernel_cp,
+               inner_kernel_ncp,
+               to_cp=noop,
+               to_ncp=noop,
+               seed=None,
+               name=None):
 
-    self._seed_stream = tfp.distributions.SeedStream(
-        seed, 'interleaved_one_step')
+    self._seed_stream = tfp.distributions.SeedStream(seed,
+                                                     'interleaved_one_step')
 
     if (inner_kernel_cp.seed == inner_kernel_ncp.seed and
         inner_kernel_cp.seed is not None):
@@ -74,7 +71,10 @@ class Interleaved(TransitionKernel):
           'The two interleaved kernels cannot have the same random seed.')
 
     self._parameters = dict(
-        inner_kernels={'cp': inner_kernel_cp, 'ncp': inner_kernel_ncp},
+        inner_kernels={
+            'cp': inner_kernel_cp,
+            'ncp': inner_kernel_ncp
+        },
         to_cp=to_cp,
         to_ncp=to_ncp,
         seed=seed,
@@ -116,12 +116,8 @@ class Interleaved(TransitionKernel):
         values=[current_state, previous_kernel_results]):
 
       # Take a step in the CP space
-      [
-          next_cp_state,
-          kernel_res_cp
-      ] = self.inner_kernel['cp'].one_step(
-          current_state,
-          previous_kernel_results.accepted_results)
+      [next_cp_state, kernel_res_cp] = self.inner_kernel['cp'].one_step(
+          current_state, previous_kernel_results.accepted_results)
 
       current_ncp_state = self.to_ncp(next_cp_state)
 
@@ -134,17 +130,19 @@ class Interleaved(TransitionKernel):
           is_accepted=kernel_res_cp.is_accepted,
           log_accept_ratios={
               'cp': kernel_res_cp.log_accept_ratio,
-              'ncp': previous_kernel_results.log_accept_ratios['ncp']},
-          extras={'cp': kernel_res_cp.extra,
-                  'ncp': previous_kernel_results.extras['ncp']})
+              'ncp': previous_kernel_results.log_accept_ratios['ncp']
+          },
+          extras={
+              'cp': kernel_res_cp.extra,
+              'ncp': previous_kernel_results.extras['ncp']
+          })
 
       # Take a step in the NCP space
       [
           next_ncp_state,
           kernel_res_ncp,
       ] = self.inner_kernel['ncp'].one_step(
-          current_ncp_state,
-          previous_kernel_results_ncp.accepted_results)
+          current_ncp_state, previous_kernel_results_ncp.accepted_results)
 
       next_state = self.to_cp(next_ncp_state)
 
@@ -155,9 +153,14 @@ class Interleaved(TransitionKernel):
           next_state,
           inner_name='cp',
           is_accepted=kernel_res_ncp.is_accepted,
-          log_accept_ratios={'cp': kernel_res_cp.log_accept_ratio,
-                             'ncp': kernel_res_ncp.log_accept_ratio},
-          extras={'cp': kernel_res_cp.extra, 'ncp': kernel_res_ncp.extra})
+          log_accept_ratios={
+              'cp': kernel_res_cp.log_accept_ratio,
+              'ncp': kernel_res_ncp.log_accept_ratio
+          },
+          extras={
+              'cp': kernel_res_cp.extra,
+              'ncp': kernel_res_ncp.extra
+          })
 
       return next_state, kernel_results
 
@@ -192,8 +195,6 @@ class Interleaved(TransitionKernel):
           is_accepted=True if is_accepted is None else is_accepted,
           log_accept_ratios=({
               'cp': tf.zeros_like(len(pkr.proposed_state), dtype=tf.float32),
-              'ncp': tf.zeros_like(len(pkr.proposed_state), dtype=tf.float32)}
-                             if log_accept_ratios is None
-                             else log_accept_ratios),
-          extras=extras
-      )
+              'ncp': tf.zeros_like(len(pkr.proposed_state), dtype=tf.float32)
+          } if log_accept_ratios is None else log_accept_ratios),
+          extras=extras)

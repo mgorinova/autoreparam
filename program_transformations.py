@@ -12,14 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Transformations of Edward2 programs."""
 # pylint: disable=missing-docstring
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
-
 
 import collections
 import inspect
@@ -41,8 +39,8 @@ def make_log_joint_fn(model):
   """Takes Edward probabilistic program and returns its log joint function.
 
   Args:
-    model: Python callable which executes the generative process of a
-      computable probability distribution using `ed.RandomVariable`s.
+    model: Python callable which executes the generative process of a computable
+      probability distribution using `ed.RandomVariable`s.
 
   Returns:
     A log-joint probability function. Its inputs are `model`'s original inputs
@@ -123,6 +121,7 @@ def make_log_joint_fn(model):
             .format(err))
     log_prob = sum(log_probs)
     return log_prob
+
   return log_joint_fn
 
 
@@ -143,10 +142,8 @@ def make_value_setter(*positional_args, **model_kwargs):
 
   consumable_args = [x for x in positional_args]
   if len(consumable_args) and len(model_kwargs):
-    raise ValueError(
-        'make_value_setter does not support simultaneous '
-        'use of positional and keyword args.'
-    )
+    raise ValueError('make_value_setter does not support simultaneous '
+                     'use of positional and keyword args.')
 
   def set_values(f, *args, **kwargs):
     """Sets random variable values to its aligned value."""
@@ -156,6 +153,7 @@ def make_value_setter(*positional_args, **model_kwargs):
     elif consumable_args:
       kwargs['value'] = consumable_args.pop(0)
     return interceptable(f)(*args, **kwargs)
+
   return set_values
 
 
@@ -195,8 +193,9 @@ def make_variational_model(model, *args, **kwargs):
                           initializer=1e-10*tf.ones(shape, dtype=tf.float32))
 
       variational_parameters[scale_name] = tf.nn.softplus(
-          tf.get_variable(name=scale_name,
-                          initializer=-10*tf.ones(shape, dtype=tf.float32)))
+          tf.get_variable(
+              name=scale_name,
+              initializer=-10 * tf.ones(shape, dtype=tf.float32)))
       return (variational_parameters[loc_name],
               variational_parameters[scale_name])
 
@@ -228,8 +227,8 @@ def make_variational_model(model, *args, **kwargs):
 # FIXME: Assumes the name of the data starts with y... Need to fix so that
 # it works with user-specified data.
 def ncp(rv_constructor, *rv_args, **rv_kwargs):
-  if (rv_constructor.__name__ == 'Normal'
-      and not rv_kwargs['name'].startswith('y')):
+  if (rv_constructor.__name__ == 'Normal' and
+      not rv_kwargs['name'].startswith('y')):
     loc = rv_kwargs['loc']
     scale = rv_kwargs['scale']
     name = rv_kwargs['name']
@@ -257,112 +256,111 @@ def make_learnable_parametrisation(init_val_loc=0.,
                                    init_val_scale=0.,
                                    learnable_parameters=None,
                                    tau=1.,
-																	 parameterisation_type='exp'):
+                                   parameterisation_type='exp'):
 
-	allow_new_variables = False
-	if learnable_parameters is None:
-		learnable_parameters = collections.OrderedDict()
-		allow_new_variables = True
-		
-	def get_or_init(name, shape):
-		loc_name = name + '_a'
-		scale_name = name + '_b'
+  allow_new_variables = False
+  if learnable_parameters is None:
+    learnable_parameters = collections.OrderedDict()
+    allow_new_variables = True
 
-		if loc_name in learnable_parameters.keys() and \
-				scale_name in learnable_parameters.keys():
-			return learnable_parameters[loc_name], learnable_parameters[scale_name]
-		else:
-			if not allow_new_variables:
-				raise Exception(
-						'trying to create a variable for {}, but '
-						'parameterization was already passed in ({})'
-						.format(name, learnable_parameters))
-			learnable_parameters[loc_name] = tf.sigmoid(  
-					tau * tf.get_variable(
-							name=loc_name + '_unconstrained',
-							initializer=tf.ones(shape) * init_val_loc))
+  def get_or_init(name, shape):
+    loc_name = name + '_a'
+    scale_name = name + '_b'
 
-			learnable_parameters[scale_name] = tf.sigmoid(  
-					tau * tf.get_variable(
-							name=scale_name + '_unconstrained',
-							initializer=tf.ones(shape) * init_val_scale))
+    if loc_name in learnable_parameters.keys() and \
+      scale_name in learnable_parameters.keys():
+      return learnable_parameters[loc_name], learnable_parameters[scale_name]
+    else:
+      if not allow_new_variables:
+        raise Exception('trying to create a variable for {}, but '
+                        'parameterization was already passed in ({})'.format(
+                            name, learnable_parameters))
+      learnable_parameters[loc_name] = tf.sigmoid(tau * tf.get_variable(
+          name=loc_name + '_unconstrained',
+          initializer=tf.ones(shape) * init_val_loc))
 
-			return learnable_parameters[loc_name], learnable_parameters[scale_name]
+      learnable_parameters[scale_name] = tf.sigmoid(tau * tf.get_variable(
+          name=scale_name + '_unconstrained',
+          initializer=tf.ones(shape) * init_val_scale))
 
-	bijectors = collections.OrderedDict()
-	
-	if parameterisation_type == 'exp':
-		def recenter(rv_constructor, *rv_args, **rv_kwargs):
-				if (rv_constructor.__name__ == 'Normal'
-						and not rv_kwargs['name'].startswith('y')):
+      return learnable_parameters[loc_name], learnable_parameters[scale_name]
 
-					# NB: assume everything is kwargs for now.
-					x_loc = rv_kwargs['loc']
-					x_scale = rv_kwargs['scale']
+  bijectors = collections.OrderedDict()
 
-					name = rv_kwargs['name']
-					shape = rv_constructor(*rv_args, **rv_kwargs).shape
+  if parameterisation_type == 'exp':
 
-					a, b = get_or_init(name, shape)  # w
+    def recenter(rv_constructor, *rv_args, **rv_kwargs):
+      if (rv_constructor.__name__ == 'Normal' and
+          not rv_kwargs['name'].startswith('y')):
 
-					kwargs_std = {}
-					kwargs_std['loc'] = tf.multiply(x_loc, a)
-					kwargs_std['scale'] = tf.pow(x_scale, b) # tf.multiply(x_scale - 1., b) + 1.
-					kwargs_std['name'] = name + '_param'
-					
-					scale = x_scale / kwargs_std['scale'] # tf.pow(x_scale, 1. - b)
-					shift = x_loc - tf.multiply(scale, kwargs_std['loc'])
-					b = tfb.AffineScalar(
-							scale=scale, shift=shift)
-					if 'value' in rv_kwargs:
-						kwargs_std['value'] = b.inverse(rv_kwargs['value'])
+        # NB: assume everything is kwargs for now.
+        x_loc = rv_kwargs['loc']
+        x_scale = rv_kwargs['scale']
 
-					rv_std = interceptable(rv_constructor)(*rv_args, **kwargs_std)
-					bijectors[name] = b
-					return b.forward(rv_std)
+        name = rv_kwargs['name']
+        shape = rv_constructor(*rv_args, **rv_kwargs).shape
 
-				else:
-					return interceptable(rv_constructor)(*rv_args, **rv_kwargs)
-			
-		return learnable_parameters, recenter, bijectors
-		
-	elif parameterisation_type == 'scale':
-		def recenter(rv_constructor, *rv_args, **rv_kwargs):
-				if (rv_constructor.__name__ == 'Normal'
-						and not rv_kwargs['name'].startswith('y')):
+        a, b = get_or_init(name, shape)  # w
 
-					# NB: assume everything is kwargs for now.
-					x_loc = rv_kwargs['loc']
-					x_scale = rv_kwargs['scale']
+        kwargs_std = {}
+        kwargs_std['loc'] = tf.multiply(x_loc, a)
+        kwargs_std['scale'] = tf.pow(x_scale,
+                                     b)  # tf.multiply(x_scale - 1., b) + 1.
+        kwargs_std['name'] = name + '_param'
 
-					name = rv_kwargs['name']
-					shape = rv_constructor(*rv_args, **rv_kwargs).shape
+        scale = x_scale / kwargs_std['scale']  # tf.pow(x_scale, 1. - b)
+        shift = x_loc - tf.multiply(scale, kwargs_std['loc'])
+        b = tfb.AffineScalar(scale=scale, shift=shift)
+        if 'value' in rv_kwargs:
+          kwargs_std['value'] = b.inverse(rv_kwargs['value'])
 
-					a, b = get_or_init(name, shape)  # w
+        rv_std = interceptable(rv_constructor)(*rv_args, **kwargs_std)
+        bijectors[name] = b
+        return b.forward(rv_std)
 
-					kwargs_std = {}
-					kwargs_std['loc'] = tf.multiply(x_loc, a)
-					kwargs_std['scale'] = tf.pow(x_scale, b) # tf.multiply(x_scale - 1., b) + 1.
-					kwargs_std['name'] = name + '_param'
-					
-					scale = x_scale / kwargs_std['scale'] # tf.pow(x_scale, 1. - b)
-					shift = x_loc - tf.multiply(scale, kwargs_std['loc'])
-					b = tfb.AffineScalar(
-							scale=scale, shift=shift)
-					if 'value' in rv_kwargs:
-						kwargs_std['value'] = b.inverse(rv_kwargs['value'])
+      else:
+        return interceptable(rv_constructor)(*rv_args, **rv_kwargs)
 
-					rv_std = interceptable(rv_constructor)(*rv_args, **kwargs_std)
-					bijectors[name] = b
-					return b.forward(rv_std)
+    return learnable_parameters, recenter, bijectors
 
-				else:
-					return interceptable(rv_constructor)(*rv_args, **rv_kwargs)
+  elif parameterisation_type == 'scale':
 
-		return learnable_parameters, recenter, bijectors
-	
-	else:
-		raise Exception('Unexpected parameterisation type.')
+    def recenter(rv_constructor, *rv_args, **rv_kwargs):
+      if (rv_constructor.__name__ == 'Normal' and
+          not rv_kwargs['name'].startswith('y')):
+
+        # NB: assume everything is kwargs for now.
+        x_loc = rv_kwargs['loc']
+        x_scale = rv_kwargs['scale']
+
+        name = rv_kwargs['name']
+        shape = rv_constructor(*rv_args, **rv_kwargs).shape
+
+        a, b = get_or_init(name, shape)  # w
+
+        kwargs_std = {}
+        kwargs_std['loc'] = tf.multiply(x_loc, a)
+        kwargs_std['scale'] = tf.pow(x_scale,
+                                     b)  # tf.multiply(x_scale - 1., b) + 1.
+        kwargs_std['name'] = name + '_param'
+
+        scale = x_scale / kwargs_std['scale']  # tf.pow(x_scale, 1. - b)
+        shift = x_loc - tf.multiply(scale, kwargs_std['loc'])
+        b = tfb.AffineScalar(scale=scale, shift=shift)
+        if 'value' in rv_kwargs:
+          kwargs_std['value'] = b.inverse(rv_kwargs['value'])
+
+        rv_std = interceptable(rv_constructor)(*rv_args, **kwargs_std)
+        bijectors[name] = b
+        return b.forward(rv_std)
+
+      else:
+        return interceptable(rv_constructor)(*rv_args, **rv_kwargs)
+
+    return learnable_parameters, recenter, bijectors
+
+  else:
+    raise Exception('Unexpected parameterisation type.')
 
 
 def _get_function_inputs(f, **kwargs):

@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Generate text results from pickled results."""
 # pylint: disable=missing-docstring,broad-except
 
@@ -28,7 +27,6 @@ from absl import flags
 
 import numpy as np
 import tensorflow as tf
-
 
 alg_names = ['HMC-CP', 'HMC-NCP', 'iHMC', 'c-VIP-HMC', 'd-VIP-HMC']
 
@@ -72,8 +70,9 @@ def get_best_esss_results(model_name, results_dir):
       [(alg, 0) for alg in alg_names])
 
   for num_leapfrog_steps in [1, 2, 4, 8, 16, 32]:
-    folder = os.path.join(results_dir, 'num_leapfrog_steps={}/{}'.format(
-        num_leapfrog_steps, model_name))
+    folder = os.path.join(
+        results_dir, 'num_leapfrog_steps={}/{}'.format(num_leapfrog_steps,
+                                                       model_name))
 
     try:
       runs = get_all_results(folder)
@@ -99,7 +98,7 @@ def print_ess_stats(esss):
     min_esss = esss[alg]
 
     mean = np.mean(min_esss)
-    std = np.std(min_esss)/np.sqrt(len(min_esss))
+    std = np.std(min_esss) / np.sqrt(len(min_esss))
 
     print('{}: {} +/- {}'.format(alg, mean, std))
     print(min_esss)
@@ -124,7 +123,7 @@ def analyze_dataset(model_dataset_name, results_dir):
     for alg in alg_names:
       min_esss = esss[alg]
       mean = np.mean(min_esss)
-      std = np.std(min_esss)/np.sqrt(len(min_esss))
+      std = np.std(min_esss) / np.sqrt(len(min_esss))
       f.write('{}: {} +/- {}\n'.format(alg, mean, std))
       f.write(str(min_esss) + '\n')
 
@@ -171,6 +170,7 @@ def analyze_dataset(model_dataset_name, results_dir):
 
 def main(_):
   analyze_dataset(FLAGS.model_and_dataset, FLAGS.results_dir)
+
 
 if __name__ == '__main__':
   tf.app.run()

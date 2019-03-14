@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Tools."""
 # pylint: disable=missing-docstring,g-doc-args,g-doc-return-or-yield
 # pylint: disable=g-short-docstring-punctuation,g-no-space-after-docstring-summary
@@ -38,9 +37,9 @@ from tensorflow_probability.python.edward2.generated_random_variables import Nor
 from tensorflow_probability.python.edward2.interceptor import tape
 from tensorflow_probability.python.edward2.program_transformations import make_log_joint_fn
 
-from tensorflow.python.ops.parallel_for import pfor
+from google3.third_party.tensorflow.python.ops.parallel_for import pfor
 
-import program_transformations
+import google3.experimental.users.davmre.autoreparam.program_transformations as program_transformations
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -51,7 +50,6 @@ except ImportError:
   # Python 3
   import builtins as __builtin__
 # pylint: enable=g-import-not-at-top
-
 
 __all__ = [
     'condition_number_cp',
@@ -74,16 +72,16 @@ def compute_V_ncp(q, v):
 
 
 def condition_number_cp(q, v):
-  sqrt_det = 2 * np.sqrt((v*q + 1) * (v*q + 1)  -
-                         v * (v*q + q + 1) * (v*q + 1) / (v + 1))
+  sqrt_det = 2 * np.sqrt((v * q + 1) * (v * q + 1) - v * (v * q + q + 1) *
+                         (v * q + 1) / (v + 1))
   lambda1 = 2*(v*q + 1) - sqrt_det
   lambda2 = 2*(v*q + 1) + sqrt_det
   return lambda2 / lambda1
 
 
 def condition_number_ncp(q, v):
-  sqrt_det = 2 * np.sqrt((v*q + 1) * (v*q + 1)  -
-                         (v*q + q + 1) * (v*q + 1) / (q + 1))
+  sqrt_det = 2 * np.sqrt((v * q + 1) * (v * q + 1) - (v * q + q + 1) *
+                         (v * q + 1) / (q + 1))
   lambda1 = 2*(v*q + 1) - sqrt_det
   lambda2 = 2*(v*q + 1) + sqrt_det
   return lambda2 / lambda1
@@ -141,8 +139,8 @@ def mean_field_variational_inference(model, *args, **kwargs):
         timeline = this_timeline
         best_elbo = this_elbo
 
-        vals = sess.run(list(variational_parameters.values()),
-                        feed_dict=feed_dict)
+        vals = sess.run(
+            list(variational_parameters.values()), feed_dict=feed_dict)
         learned_variational_params = collections.OrderedDict(
             zip(variational_parameters.keys(), vals))
 
@@ -198,8 +196,8 @@ def get_iaf_elbo(target, num_mc_samples, param_shapes):
     results = []
     n_dimensions_used = 0
     for (n_to_add, result_shape) in zip(shape_sizes, param_shapes.values()):
-      result = variational_sample[
-          Ellipsis, n_dimensions_used:n_dimensions_used + n_to_add]
+      result = variational_sample[Ellipsis, n_dimensions_used:
+                                  n_dimensions_used + n_to_add]
       results.append(tf.reshape(result, result_shape))
       n_dimensions_used += n_to_add
     return tuple(results)
@@ -231,37 +229,40 @@ def get_iaf_elbo(target, num_mc_samples, param_shapes):
   return elbo
 
 
-def get_mean_field_elbo(model, target, num_mc_samples, model_args, model_obs_kwargs, vi_kwargs):
+def get_mean_field_elbo(model, target, num_mc_samples, model_args,
+                        model_obs_kwargs, vi_kwargs):
+  if FLAGS.reparameterise_variational and 'cVIP' in FLAGS.method:
+    combined_kwargs = model_obs_kwargs.copy()
+    combined_kwargs.update(vi_kwargs)
+    variational_model, variational_parameters = make_variational_model_special(
+        model, *model_args, **combined_kwargs)
+  else:
+    variational_model, variational_parameters = program_transformations.make_variational_model(
+        model, *model_args, **model_obs_kwargs)
 
-	if FLAGS.reparameterise_variational and 'cVIP' in FLAGS.method:
-		variational_model, variational_parameters = make_variational_model_special(
-			model, *model_args, **model_obs_kwargs, **vi_kwargs)
-	else:
-		variational_model, variational_parameters = program_transformations.make_variational_model(
-			model, *model_args, **model_obs_kwargs)
+  log_joint_q = make_log_joint_fn(variational_model)
 
-	log_joint_q = make_log_joint_fn(variational_model)
-	def target_q(**parameters):
-		return log_joint_q(*model_args, **parameters)
+  def target_q(**parameters):
+    return log_joint_q(*model_args, **parameters)
 
-	#beta = tf.get_variable("beta", trainable=False, initializer=0.)
-	#beta_incr = tf.assign(beta, tf.clip_by_value(beta + 0.1*beta + 0.0000001, 0., 1.))
+  #beta = tf.get_variable("beta", trainable=False, initializer=0.)
+  #beta_incr = tf.assign(beta, tf.clip_by_value(beta + 0.1*beta + 0.0000001, 0., 1.))
 
-	#with tf.control_dependencies([beta_incr]):
+  #with tf.control_dependencies([beta_incr]):
 
-	def loop_body(mc_sample):  
-		with tape() as variational_tape:
-			_ = variational_model(*model_args)
+  def loop_body(mc_sample):
+    with tape() as variational_tape:
+      _ = variational_model(*model_args)
 
-			params = variational_tape.values()
+      params = variational_tape.values()
 
-			energy = target(*params)
-			entropy = tf.negative(target_q(**variational_tape))
-			return energy + entropy
+      energy = target(*params)
+      entropy = tf.negative(target_q(**variational_tape))
+      return energy + entropy
 
-	elbo = tf.reduce_sum( pfor(loop_body, num_mc_samples) ) / num_mc_samples
-	tf.summary.scalar('elbo', elbo)
-	return elbo, variational_parameters
+  elbo = tf.reduce_sum(pfor(loop_body, num_mc_samples)) / num_mc_samples
+  tf.summary.scalar('elbo', elbo)
+  return elbo, variational_parameters
 
 
 def get_approximate_step_size(variational_parameters, num_leapfrog_steps):
@@ -320,8 +321,9 @@ def estimate_true_mean(sample_groups, esss):
     samples = sample_groups[group]
     mean = [np.mean(v) for v in samples]
 
-    true_mean[group] = [(true_mean[group] + esss[group] * var_mean / r)
-                        for var_mean in mean]
+    true_mean[group] = [
+        (true_mean[group] + esss[group] * var_mean / r) for var_mean in mean
+    ]
 
   return true_mean
 
@@ -344,8 +346,10 @@ def make_variational_model_special(model, *args, **kwargs):
       # shape must not be None
       pre_loc = tf.get_variable(
           name=loc_name, initializer=1e-10 * tf.ones(shape, dtype=tf.float32))
-      pre_scale = tf.nn.softplus(tf.get_variable(
-          name=scale_name, initializer=-4*tf.ones(shape, dtype=tf.float32)))
+      pre_scale = tf.nn.softplus(
+          tf.get_variable(
+              name=scale_name,
+              initializer=-4 * tf.ones(shape, dtype=tf.float32)))
       variational_parameters[loc_name] = (a + 0.1) * pre_loc
       variational_parameters[scale_name] = pre_scale**(b + 0.1)
 
@@ -361,9 +365,8 @@ def make_variational_model_special(model, *args, **kwargs):
       try:
         a, b = param_params[name[:-5] + 'a'], param_params[name[:-5] + 'b']
       except Exception as err:
-        print(
-            'couldn\'t get centering params for variable {}: {}'.format(
-                name, err))
+        print('couldn\'t get centering params for variable {}: {}'.format(
+            name, err))
         a, b = 1., 1.
       loc, scale = get_or_init(name, a=a, b=b, shape=rv.shape)
 
@@ -390,45 +393,45 @@ def print(*args):  # pylint: disable=redefined-builtin
 
 
 def reject_outliers(data, m=1.5):
-	ret = data[abs(data - np.mean(data)) < m * np.std(data)]
-	if len(ret) > 0:
-		return ret
-	else:
-		return data
-			
-	
+  ret = data[abs(data - np.mean(data)) < m * np.std(data)]
+  if len(ret) > 0:
+    return ret
+  else:
+    return data
+
+
 def get_min_ess_other(ess):
 
-	ess = [[np.nan_to_num(e) for e in es] for es in ess]
-	
-	min_ess = []
-	for c in range(FLAGS.num_chains):
-		min_ess_c = min([np.array(e).min() for e in ess[c]])
-		#print("   Min ess of chain {} is {}.".format(c, min_ess_c))
-		min_ess.append(min_ess_c)
-	
-	min_ess = reject_outliers(np.array(min_ess))	
-	print("   Filtred {} outliers.".format(FLAGS.num_chains - len(min_ess)))
-	
-	mean_ess = np.mean(min_ess)
-	sem_ess = np.std(min_ess) / np.sqrt(len(min_ess))
+  ess = [[np.nan_to_num(e) for e in es] for es in ess]
 
-	return mean_ess, sem_ess
-	
+  min_ess = []
+  for c in range(FLAGS.num_chains):
+    min_ess_c = min([np.array(e).min() for e in ess[c]])
+    #print("   Min ess of chain {} is {}.".format(c, min_ess_c))
+    min_ess.append(min_ess_c)
+
+  min_ess = reject_outliers(np.array(min_ess))
+  print('   Filtred {} outliers.'.format(FLAGS.num_chains - len(min_ess)))
+
+  mean_ess = np.mean(min_ess)
+  sem_ess = np.std(min_ess) / np.sqrt(len(min_ess))
+
+  return mean_ess, sem_ess
+
 
 def get_min_ess(ess):
 
-	ess = [np.nan_to_num(e) for e in ess]
-	
-	min_ess = []
-	for c in range(FLAGS.num_chains):
-		min_ess_c = min([np.array(e[c]).min() for e in ess])
-		min_ess.append(min_ess_c)
-	
-	# min_ess = reject_outliers(np.array(min_ess))	
-	# print("   Filtred {} outliers.".format(FLAGS.num_chains - len(min_ess)))
-	
-	mean_ess = np.mean(min_ess)
-	sem_ess = np.std(min_ess) / np.sqrt(len(min_ess))
+  ess = [np.nan_to_num(e) for e in ess]
 
-	return mean_ess, sem_ess
+  min_ess = []
+  for c in range(FLAGS.num_chains):
+    min_ess_c = min([np.array(e[c]).min() for e in ess])
+    min_ess.append(min_ess_c)
+
+  # min_ess = reject_outliers(np.array(min_ess))
+  # print("   Filtred {} outliers.".format(FLAGS.num_chains - len(min_ess)))
+
+  mean_ess = np.mean(min_ess)
+  sem_ess = np.std(min_ess) / np.sqrt(len(min_ess))
+
+  return mean_ess, sem_ess
