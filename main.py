@@ -15,7 +15,7 @@ import inference, graphs, models, util
 from tensorflow_probability.python import mcmc
 from tensorflow.python.ops.parallel_for import pfor
 
-import json, pickle
+import json
 
 flags = tf.app.flags
 
@@ -421,9 +421,20 @@ def main(_):
 			json.dump(results, outfile)
 
 		i = len(results['ess_min'])  
-
-		with open(file_path[:-5] + '{}'.format(i) + '.pkl', 'wb') as outfile:
-			pickle.dump({"samples": samples, "ess": ess_final}, outfile)
+		
+		with ed.tape() as model_tape:
+			model_config.model(*model_config.model_args)
+		param_names = [k for k in list(model_tape.keys()) if k not in model_config.observed_data]
+		print(param_names)
+		print(len(samples))
+			
+		dict_res = dict([(param_names[i], samples[i]) for i in range(len(param_names))])
+		dict_ess = dict([(param_names[i], np.array(ess_final[i])) for i in range(len(param_names))])
+			
+		np_path = file_path[:-5] + '{}'.format(i)
+		np.savez_compressed(np_path, **dict_res)
+		np_path = file_path[:-5] + '_ess_{}'.format(i)
+		np.savez_compressed(np_path, **dict_ess)
 				
 if __name__ == "__main__":
   tf.app.run()
