@@ -217,17 +217,14 @@ def make_per_chain_step_size_update_policy(num_adaptation_steps,
   return step_size_simple_update_fn
 
 
-def hmc(target, model, model_config, step_size_init, reparam=None):
+def hmc(target, model, model_config, step_size_init, reparam):
   """Runs HMC to sample from the given target distribution."""
-  if reparam is not None:
-    if reparam == 'CP':
-      to_centered = lambda x: x
-    elif reparam == 'NCP':
-      to_centered = model_config.to_centered
-    else:
-      to_centered = model_config.make_to_centered(**reparam)
-  else:
+  if reparam == 'CP':
     to_centered = lambda x: x
+  elif reparam == 'NCP':
+    to_centered = model_config.to_centered
+  else:
+    to_centered = model_config.make_to_centered(**reparam)
 
   model_config = model_config._replace(to_centered=to_centered)
 

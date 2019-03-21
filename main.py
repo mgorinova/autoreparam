@@ -103,12 +103,22 @@ FLAGS = flags.FLAGS
 
 
 def create_target_graph(model_config, results_dir):
+
+  cVIP_path = os.path.join(
+    results_dir, 'cVIP_{}{}{}.json'.format(
+        FLAGS.learnable_parmeterisation_type,
+        '_reparam_variational' if FLAGS.reparameterise_variational else '',
+        '_discrete_prior' if FLAGS.discrete_prior else ''))
+
+  actual_reparam = None
   if FLAGS.method == 'CP':
     (target, model, elbo, variational_parameters,
      learnable_parameters) = graphs.make_cp_graph(model_config)
+    actual_reparam = 'CP'
   elif FLAGS.method == 'NCP':
     (target, model, elbo, variational_parameters,
      learnable_parameters) = graphs.make_ncp_graph(model_config)
+    actual_reparam = 'NCP'
   elif FLAGS.method == 'i':
     if FLAGS.inference == 'VI':
       Exception('Cannot run interleaved VI. Use `i` method with HMC only.')
@@ -119,33 +129,23 @@ def create_target_graph(model_config, results_dir):
     elbo, variational_parameters, learnable_parameters = None, None, None
 
   elif FLAGS.method == 'cVIP':
-    cVIP_path = os.path.join(
-        results_dir, 'cVIP_{}{}{}.json'.format(
-            FLAGS.learnable_parmeterisation_type,
-            '_reparam_variational' if FLAGS.reparameterise_variational else '',
-            '_discrete_prior' if FLAGS.discrete_prior else ''))
-    if tf.gfile.Exists(cVIP_path):
+    if FLAGS.inference == "VI":
+      (target, model, elbo, variational_parameters,
+       learnable_parameters) = graphs.make_cvip_graph(
+           model_config,
+           parameterisation_type=FLAGS.learnable_parmeterisation_type)
+    else:
       with tf.gfile.Open(cVIP_path, 'r') as f:
         prev_results = json.load(f)
-        reparam = prev_results['learned_reparam']
+        actual_reparam = prev_results['learned_reparam']
 
         (target, model, elbo, variational_parameters,
          learnable_parameters) = graphs.make_dvip_graph(
              model_config,
-             reparam,
+             actual_reparam,
              parameterisation_type=FLAGS.learnable_parmeterisation_type)
 
-    (target, model, elbo, variational_parameters,
-     learnable_parameters) = graphs.make_cvip_graph(
-         model_config,
-         parameterisation_type=FLAGS.learnable_parmeterisation_type)
-
   elif FLAGS.method == 'dVIP':
-    cVIP_path = os.path.join(
-        results_dir, 'cVIP_{}{}{}.json'.format(
-            FLAGS.learnable_parmeterisation_type,
-            '_reparam_variational' if FLAGS.reparameterise_variational else '',
-            '_discrete_prior' if FLAGS.discrete_prior else ''))
     if tf.gfile.Exists(cVIP_path):
       with tf.gfile.Open(cVIP_path, 'r') as f:
         prev_results = json.load(f)
@@ -156,20 +156,26 @@ def create_target_graph(model_config, results_dir):
     discrete_parameterisation = collections.OrderedDict(
         [(key, (np.array(reparam[key]) >= 0.5).astype(np.float32))
          for key in reparam.keys()])
+    print("discrete parameterisation is", discrete_parameterisation)
 
     (target, model, elbo, variational_parameters,
      learnable_parameters) = graphs.make_dvip_graph(
          model_config,
          discrete_parameterisation,
          parameterisation_type=FLAGS.learnable_parmeterisation_type)
+    actual_reparam = discrete_parameterisation
 
-  return target, model, elbo, variational_parameters, learnable_parameters
+  return (target,
+          model,
+          elbo,
+          variational_parameters,
+          learnable_parameters,
+          actual_reparam)
 
 
 def tune_leapfrog_steps(model_config,
                         num_tuning_samples,
                         initial_step_size,
-                        learned_reparam,
                         results_dir):
   util.print('Tuning number of leapfrog steps...')
 
@@ -183,7 +189,8 @@ def tune_leapfrog_steps(model_config,
     FLAGS.num_leapfrog_steps = nls
 
     (target, model, elbo, variational_parameters,
-     learnable_parameters) = create_target_graph(model_config, results_dir)
+     learnable_parameters, actual_reparam) = create_target_graph(
+            model_config, results_dir)
 
     if FLAGS.method == 'i':
       (states_orig, kernel_results, ess) = \
@@ -195,8 +202,9 @@ def tune_leapfrog_steps(model_config,
 
     else:
       (states_orig, kernel_results, states, ess) = \
-        inference.hmc(target, model, model_config, initial_step_size,
-               reparam=learned_reparam)
+        inference.hmc(target, model, model_config,
+                      initial_step_size,
+                      reparam=actual_reparam)
 
     init = tf.global_variables_initializer()
     with tf.Session() as sess:
@@ -244,6 +252,8 @@ def main(_):
     model_config = models.get_electric()
   elif FLAGS.model == 'time_series':
     model_config = models.get_time_series()
+  elif FLAGS.model == 'neals_funnel':
+    model_config = models.get_neals_funnel()
   else:
     raise Exception('unknown model {}'.format(FLAGS.model))
 
@@ -269,7 +279,8 @@ def main(_):
   if FLAGS.inference == 'VI':
 
     (target, model, elbo, variational_parameters,
-     learnable_parameters) = create_target_graph(model_config, results_dir)
+     learnable_parameters, actual_reparam) = create_target_graph(
+            model_config, results_dir)
 
     if tf.gfile.Exists(file_path):
       util.print(
@@ -282,10 +293,10 @@ def main(_):
       # Use a mixture of Laplace (as opposed to Beta or Kumaraswamy) because
       # it takes finite values at 0 and 1.
       learnable_parameters_prior = tfp.distributions.Mixture(
-          tfp.distributions.Categorical(logits=[0., 2., 0.]),
-          [tfp.distributions.Laplace(loc=0., scale=0.01),
+          tfp.distributions.Categorical(logits=[0., 5., 0.]),
+          [tfp.distributions.Laplace(loc=0., scale=0.1),
            tfp.distributions.Uniform(),
-           tfp.distributions.Laplace(loc=1., scale=0.01)])
+           tfp.distributions.Laplace(loc=1., scale=0.1)])
 
     (elbo_final, elbo_timeline, learning_rate, initial_step_size,
      learned_variational_params,
@@ -294,6 +305,10 @@ def main(_):
          variational_parameters,
          learnable_parameters_prior=learnable_parameters_prior,
          learnable_parameters=learnable_parameters)
+
+    # Save actual parameters used for dVIP
+    if learned_reparam is None:
+      learned_reparam = actual_reparam
 
     results = {
      'elbo': elbo_final.item(),
@@ -344,7 +359,7 @@ def main(_):
         max_nls = tune_leapfrog_steps(
             model_config,
             FLAGS.num_tuning_samples,
-            (initial_step_size_cp, initial_step_size_ncp), None,
+            (initial_step_size_cp, initial_step_size_ncp),
             results_dir)
 
         with tf.gfile.Open(file_path, 'w') as f:
@@ -360,7 +375,8 @@ def main(_):
           FLAGS.num_leapfrog_steps))
 
       (target, model, elbo, variational_parameters,
-       learnable_parameters) = create_target_graph(model_config, results_dir)
+       learnable_parameters, actual_reparam) = create_target_graph(
+              model_config, results_dir)
 
       target_cp, target_ncp = target
 
@@ -387,7 +403,6 @@ def main(_):
         with tf.gfile.Open(file_path, 'r') as f:
           prev_results = json.load(f)
           initial_step_size = prev_results['initial_step_size']
-          learned_reparam = prev_results['learned_reparam']
           num_ls = prev_results.get('num_leapfrog_steps', None)
       else:
         raise Exception('Run VI first to find initial step sizes')
@@ -397,7 +412,7 @@ def main(_):
         max_nls = tune_leapfrog_steps(model_config,
                                       FLAGS.num_tuning_samples,
                                       initial_step_size,
-                                      learned_reparam, results_dir)
+                                      results_dir)
 
         with tf.gfile.Open(file_path, 'w') as f:
           prev_results['num_leapfrog_steps'] = max_nls
@@ -412,11 +427,14 @@ def main(_):
           FLAGS.num_leapfrog_steps))
 
       (target, model, elbo, variational_parameters,
-       learnable_parameters) = create_target_graph(model_config, results_dir)
+       learnable_parameters, actual_reparam) = create_target_graph(
+           model_config, results_dir)
 
       (states_orig, kernel_results, states, ess) = \
         inference.hmc(target, model, model_config, initial_step_size,
-               reparam=learned_reparam)
+                      reparam=(actual_reparam
+                               if actual_reparam is not None
+                               else learned_reparam))
 
       init = tf.global_variables_initializer()
       with tf.Session() as sess:
