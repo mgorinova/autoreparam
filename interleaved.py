@@ -37,7 +37,8 @@ warnings.simplefilter('always')
 
 InterleavedKernelResults = collections.namedtuple(
     'InterleavedKernelResults',
-    ['accepted_results', 'is_accepted', 'log_accept_ratios', 'extras'])
+    ['accepted_results', 'cp_accepted_results',
+     'is_accepted'])
 
 
 def noop(state):
@@ -115,34 +116,25 @@ class Interleaved(TransitionKernel):
         name=make_name(self.name, 'iterleaved', 'one_step'),
         values=[current_state, previous_kernel_results]):
 
+      blank_cp_results = self.inner_kernel['cp'].bootstrap_results(
+          current_state)
       # Take a step in the CP space
       [next_cp_state, kernel_res_cp] = self.inner_kernel['cp'].one_step(
-          current_state, previous_kernel_results.accepted_results)
+          current_state, blank_cp_results)
 
       current_ncp_state = self.to_ncp(next_cp_state)
-
       for i in range(len(current_ncp_state)):
         current_ncp_state[i] = tf.identity(current_ncp_state[i])
 
-      previous_kernel_results_ncp = self.bootstrap_results(
-          current_ncp_state,
-          inner_name='ncp',
-          is_accepted=kernel_res_cp.is_accepted,
-          log_accept_ratios={
-              'cp': kernel_res_cp.log_accept_ratio,
-              'ncp': previous_kernel_results.log_accept_ratios['ncp']
-          },
-          extras={
-              'cp': kernel_res_cp.extra,
-              'ncp': previous_kernel_results.extras['ncp']
-          })
+      blank_ncp_results = self.inner_kernel['cp'].bootstrap_results(
+          current_ncp_state)
 
       # Take a step in the NCP space
       [
           next_ncp_state,
           kernel_res_ncp,
       ] = self.inner_kernel['ncp'].one_step(
-          current_ncp_state, previous_kernel_results_ncp.accepted_results)
+          current_ncp_state, blank_ncp_results)
 
       next_state = self.to_cp(next_ncp_state)
 
@@ -151,50 +143,26 @@ class Interleaved(TransitionKernel):
 
       kernel_results = self.bootstrap_results(
           next_state,
-          inner_name='cp',
-          is_accepted=kernel_res_ncp.is_accepted,
-          log_accept_ratios={
-              'cp': kernel_res_cp.log_accept_ratio,
-              'ncp': kernel_res_ncp.log_accept_ratio
-          },
-          extras={
-              'cp': kernel_res_cp.extra,
-              'ncp': kernel_res_ncp.extra
-          })
+          accepted_results=kernel_res_ncp,
+          cp_accepted_results=kernel_res_cp)
 
       return next_state, kernel_results
 
   def bootstrap_results(self,
                         init_state,
-                        inner_name='INIT',
-                        is_accepted=None,
-                        log_accept_ratios=None,
-                        extras=None):
+                        accepted_results=None,
+                        cp_accepted_results=None):
     """Returns an object with the same type as returned by `one_step`."""
     with tf.name_scope(
         name=make_name(self.name, 'interleaved', 'bootstrap_results'),
         values=[init_state]):
 
-      if inner_name == 'INIT':
-        names = ['cp', 'ncp']
-      else:
-        names = [inner_name]
-
-      for kernel_name in names:
-        extras = extras if extras is not None else {'cp': [], 'ncp': []}
-
-        pkr = self.inner_kernel[kernel_name].bootstrap_results(init_state)
-        if extras is not None and extras[kernel_name]:
-          pkr = pkr._replace(extra=extras[kernel_name])
-        if log_accept_ratios is not None and kernel_name in log_accept_ratios:
-          pkr = pkr._replace(log_accept_ratio=log_accept_ratios[kernel_name])
-        extras[kernel_name] = pkr.extra
+      if accepted_results is None:
+        accepted_results = self.inner_kernel['ncp'].bootstrap_results(init_state)
+      if cp_accepted_results is None:
+        cp_accepted_results = self.inner_kernel['cp'].bootstrap_results(init_state)
 
       return InterleavedKernelResults(
-          accepted_results=pkr,
-          is_accepted=True if is_accepted is None else is_accepted,
-          log_accept_ratios=({
-              'cp': tf.zeros_like(len(pkr.proposed_state), dtype=tf.float32),
-              'ncp': tf.zeros_like(len(pkr.proposed_state), dtype=tf.float32)
-          } if log_accept_ratios is None else log_accept_ratios),
-          extras=extras)
+          accepted_results=accepted_results,
+          cp_accepted_results=cp_accepted_results,
+          is_accepted=accepted_results.is_accepted)

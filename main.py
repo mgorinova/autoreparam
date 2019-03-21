@@ -8,6 +8,8 @@ import os, time
 import collections
 from collections import OrderedDict
 
+import io
+
 import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
@@ -23,7 +25,7 @@ import google3.experimental.users.davmre.autoreparam.program_transformations as 
 from tensorflow_probability.python import mcmc
 from google3.third_party.tensorflow.python.ops.parallel_for import pfor
 
-import json, pickle
+import json
 
 flags = tf.app.flags
 
@@ -49,11 +51,18 @@ flags.DEFINE_boolean(
     default=False,
     help='Whether or not to reparameterise the variational model too.')
 
+flags.DEFINE_boolean(
+    'discrete_prior',
+    default=False,
+    help='Whether to use a prior encouraging the parameterisation parameters'
+          'to be 0 or 1.')
+
+
 flags.DEFINE_string('results_dir', default='', help='File to write results.')
 
 flags.DEFINE_list(
     'learning_rates',
-    default=[0.005, 0.01, 0.02, 0.05, 0.07, 0.1, 0.2],
+    default=[0.01, 0.02, 0.05, 0.1, 0.2, 0.4],
     help='Learning rates (list)')
 
 flags.DEFINE_integer(
@@ -71,11 +80,14 @@ flags.DEFINE_integer(
 
 flags.DEFINE_list(
     'num_leapfrog_steps_list',
-    default=[1, 2, 4, 8, 16, 32],
+    default=[1, 2, 4, 8, 16, 32, 64, 128],
     help='Number of leapfrog steps options.')
 
 flags.DEFINE_integer(
     'num_samples', default=50000, help='Number of HMC samples.')
+
+flags.DEFINE_integer(
+    'num_tuning_samples', default=10000, help='Number of HMC samples to tune the chains.')
 
 flags.DEFINE_integer('num_chains', default=100, help='Number of HMC chains.')
 
@@ -108,9 +120,10 @@ def create_target_graph(model_config, results_dir):
 
   elif FLAGS.method == 'cVIP':
     cVIP_path = os.path.join(
-        results_dir, 'cVIP_{}{}.json'.format(
+        results_dir, 'cVIP_{}{}{}.json'.format(
             FLAGS.learnable_parmeterisation_type,
-            '_reparam_variational' if FLAGS.reparameterise_variational else ''))
+            '_reparam_variational' if FLAGS.reparameterise_variational else '',
+            '_discrete_prior' if FLAGS.discrete_prior else ''))
     if tf.gfile.Exists(cVIP_path):
       with tf.gfile.Open(cVIP_path, 'r') as f:
         prev_results = json.load(f)
@@ -129,9 +142,10 @@ def create_target_graph(model_config, results_dir):
 
   elif FLAGS.method == 'dVIP':
     cVIP_path = os.path.join(
-        results_dir, 'cVIP_{}{}.json'.format(
+        results_dir, 'cVIP_{}{}{}.json'.format(
             FLAGS.learnable_parmeterisation_type,
-            '_reparam_variational' if FLAGS.reparameterise_variational else ''))
+            '_reparam_variational' if FLAGS.reparameterise_variational else '',
+            '_discrete_prior' if FLAGS.discrete_prior else ''))
     if tf.gfile.Exists(cVIP_path):
       with tf.gfile.Open(cVIP_path, 'r') as f:
         prev_results = json.load(f)
@@ -152,11 +166,15 @@ def create_target_graph(model_config, results_dir):
   return target, model, elbo, variational_parameters, learnable_parameters
 
 
-def tune_leapfrog_steps(model_config, initial_step_size, learned_reparam,
+def tune_leapfrog_steps(model_config,
+                        num_tuning_samples,
+                        initial_step_size,
+                        learned_reparam,
                         results_dir):
   util.print('Tuning number of leapfrog steps...')
 
-  FLAGS.num_samples = 20000
+  num_samples_original = FLAGS.num_samples
+  FLAGS.num_samples = num_tuning_samples
   max_nls = 1
   max_nls_value = 0
 
@@ -194,6 +212,8 @@ def tune_leapfrog_steps(model_config, initial_step_size, learned_reparam,
     if ess_min > max_nls_value:
       max_nls_value = ess_min
       max_nls = nls
+
+  FLAGS.num_samples = num_samples_original
 
   return max_nls
 
@@ -235,12 +255,14 @@ def main(_):
   if not tf.gfile.Exists(results_dir):
     tf.gfile.MakeDirs(results_dir)
 
-  filename = '{}{}{}.json'.format(
+  filename = '{}{}{}{}.json'.format(
       FLAGS.method,
       ('_' +
        FLAGS.learnable_parmeterisation_type if 'VIP' in FLAGS.method else ''),
       ('_reparam_variational'
-       if 'VIP' in FLAGS.method and FLAGS.reparameterise_variational else ''))
+       if 'VIP' in FLAGS.method and FLAGS.reparameterise_variational else ''),
+      ('_discrete_prior'
+       if 'VIP' in FLAGS.method and FLAGS.discrete_prior else ''))
 
   file_path = os.path.join(results_dir, filename)
 
@@ -255,16 +277,27 @@ def main(_):
           .format(FLAGS.inference, FLAGS.method, FLAGS.model, FLAGS.dataset))
       return
 
+    learnable_parameters_prior = None
+    if FLAGS.discrete_prior:
+      # Use a mixture of Laplace (as opposed to Beta or Kumaraswamy) because
+      # it takes finite values at 0 and 1.
+      learnable_parameters_prior = tfp.distributions.Mixture(
+          tfp.distributions.Categorical(logits=[0., 2., 0.]),
+          [tfp.distributions.Laplace(loc=0., scale=0.01),
+           tfp.distributions.Uniform(),
+           tfp.distributions.Laplace(loc=1., scale=0.01)])
+
     (elbo_final, elbo_timeline, learning_rate, initial_step_size,
      learned_variational_params,
      learned_reparam) = inference.find_best_learning_rate(
          elbo,
          variational_parameters,
+         learnable_parameters_prior=learnable_parameters_prior,
          learnable_parameters=learnable_parameters)
 
     results = {
      'elbo': elbo_final.item(),
-     'estimated_elbo_std': (np.std(elbo_timeline[-20:])).item(),
+     'estimated_elbo_std': (np.std(elbo_timeline[-32:])).item(),
      'learning_rate': learning_rate,
      'initial_step_size': [i.item() if np.isscalar(i) else i.tolist() \
                 for i in initial_step_size],
@@ -308,9 +341,10 @@ def main(_):
 
       if num_ls is None and FLAGS.num_leapfrog_steps is None:
 
-        orig_num_samples = FLAGS.num_samples
         max_nls = tune_leapfrog_steps(
-            model_config, (initial_step_size_cp, initial_step_size_ncp), None,
+            model_config,
+            FLAGS.num_tuning_samples,
+            (initial_step_size_cp, initial_step_size_ncp), None,
             results_dir)
 
         with tf.gfile.Open(file_path, 'w') as f:
@@ -318,7 +352,6 @@ def main(_):
           json.dump(prev_results, f)
 
         FLAGS.num_leapfrog_steps = max_nls
-        FLAGS.num_samples = orig_num_samples
 
       elif FLAGS.num_leapfrog_steps is None:
         FLAGS.num_leapfrog_steps = num_ls
@@ -333,7 +366,7 @@ def main(_):
 
 
       (states, kernel_results, ess) = \
-       hmc_interleaved(model_config, target_cp, target_ncp,
+       inference.hmc_interleaved(model_config, target_cp, target_ncp,
                             step_size_cp=initial_step_size_cp,
                 step_size_ncp=initial_step_size_ncp)
 
@@ -344,10 +377,8 @@ def main(_):
 
         start_time = time.time()
 
-        samples, is_accepted, ess_final, step_size, log_accept_ratio = sess.run(
-            (states, kernel_results.is_accepted, ess,
-             kernel_results.extra.step_size_assign,
-             kernel_results.log_accept_ratio))
+        samples, is_accepted, ess_final = sess.run(
+            (states, kernel_results.is_accepted, ess))
 
         mcmc_time = time.time() - start_time
 
@@ -363,8 +394,9 @@ def main(_):
 
       if num_ls is None and FLAGS.num_leapfrog_steps is None:
 
-        orig_num_samples = FLAGS.num_samples
-        max_nls = tune_leapfrog_steps(model_config, initial_step_size,
+        max_nls = tune_leapfrog_steps(model_config,
+                                      FLAGS.num_tuning_samples,
+                                      initial_step_size,
                                       learned_reparam, results_dir)
 
         with tf.gfile.Open(file_path, 'w') as f:
@@ -372,7 +404,6 @@ def main(_):
           json.dump(prev_results, f)
 
         FLAGS.num_leapfrog_steps = max_nls
-        FLAGS.num_samples = orig_num_samples
 
       elif FLAGS.num_leapfrog_steps is None:
         FLAGS.num_leapfrog_steps = num_ls
@@ -394,10 +425,9 @@ def main(_):
 
         start_time = time.time()
 
-        samples, is_accepted, ess_final, step_size, log_accept_ratio, samples_orig = sess.run(
+        samples, is_accepted, ess_final, samples_orig = sess.run(
             (states, kernel_results.is_accepted, ess,
-             kernel_results.extra.step_size_assign,
-             kernel_results.log_accept_ratio, states_orig))
+             states_orig))
 
         mcmc_time = time.time() - start_time
 
@@ -428,7 +458,6 @@ def main(_):
     results.get('acceptance_rate', []).append(
         (np.sum(is_accepted) * 100. /
          float(FLAGS.num_samples * FLAGS.num_chains)).item())
-    #results.get('step_size', []).append([s[-1].tolist() for s in step_size])
 
     results.get('mcmc_time_sec', []).append(mcmc_time)
 
@@ -437,9 +466,33 @@ def main(_):
 
     i = len(results['ess_min'])
 
-    with tf.gfile.Open(file_path[:-5] + '{}'.format(i) + '.pkl', 'wb') as outfile:
-      pickle.dump({'samples': samples, 'ess': ess_final}, outfile)
+    with ed.tape() as model_tape:
+            model_config.model(*model_config.model_args)
+    param_names = [k for k in list(model_tape.keys()) if k not in model_config.observed_data]
+    print(param_names)
+    print(len(samples))
 
+    dict_res = dict([(param_names[i], samples[i]) for i in range(len(param_names))])
+    dict_ess = dict([(param_names[i], np.array(ess_final[i])) for i in range(len(param_names))])
+
+    # Work around issues saving np arrays directly to network
+    # filesystems, by first saving to an in-memory IO buffer.
+    np_path = file_path[:-5] + '_ess_{}.npz'.format(i)
+    with tf.gfile.GFile(np_path, 'wb') as out_f:
+      io_buffer = io.BytesIO()
+      np.savez(io_buffer, **dict_ess)
+      out_f.write(io_buffer.getvalue())
+
+    txt_path = file_path[:-5] + '_ess_{}.txt'.format(i)
+    with tf.gfile.GFile(txt_path, 'w') as out_f:
+      for k, v in dict_ess.items():
+        out_f.write('{}: {}\n\n'.format(k, v))
+
+    np_path = file_path[:-5] + '{}.npz'.format(i)
+    with tf.gfile.GFile(np_path, 'wb') as out_f:
+      io_buffer = io.BytesIO()
+      np.savez(io_buffer, **dict_res)
+      out_f.write(io_buffer.getvalue())
 
 if __name__ == '__main__':
   tf.app.run()

@@ -22,6 +22,7 @@ FLAGS = tf.app.flags.FLAGS
 
 def find_best_learning_rate(elbo,
                             variational_parameters,
+                            learnable_parameters_prior=None,
                             learnable_parameters=None):
   """
                 Optimises the given ELBO using different learning rates.
@@ -31,7 +32,8 @@ def find_best_learning_rate(elbo,
                 best parameterisation for the model.
         """
   best_timeline = []
-  best_elbo = None
+  best_elbo_with_prior = None
+  best_prior_logp = None
   best_lr = None
 
   step_size_approx = util.get_approximate_step_size(
@@ -40,7 +42,15 @@ def find_best_learning_rate(elbo,
   learning_rate_ph = tf.placeholder(shape=[], dtype=tf.float32)
   learning_rate = tf.Variable(learning_rate_ph, trainable=False)
   optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
-  train = optimizer.minimize(-elbo)
+
+  # If specified, incorporate a prior on the learnable parameters.
+  prior_logp = tf.constant(0., dtype=elbo.dtype)
+  if learnable_parameters_prior is not None:
+    prior_logp = sum([tf.reduce_sum(learnable_parameters_prior.log_prob(param))
+                      for param in learnable_parameters.values()])
+  elbo_with_prior = elbo + prior_logp
+
+  train = optimizer.minimize(-elbo_with_prior)
   init = tf.global_variables_initializer()
 
   for learning_rate_val in FLAGS.learning_rates:
@@ -49,19 +59,25 @@ def find_best_learning_rate(elbo,
       feed_dict = {learning_rate_ph: learning_rate_val}
       sess.run(init, feed_dict=feed_dict)
 
-      this_timeline = []
+      elbo_with_prior_timeline = []
+      prior_logp_timeline = []
       for _ in range(FLAGS.num_optimization_steps):
-        _, e = sess.run([train, elbo])
-        this_timeline.append(e)
+        _, e, plp = sess.run([train, elbo_with_prior, prior_logp])
+        elbo_with_prior_timeline.append(e)
+        prior_logp_timeline.append(plp)
 
-      this_elbo = np.mean(this_timeline[-16:])
+      this_elbo_with_prior = np.mean(elbo_with_prior_timeline[-32:])
+      this_prior_logp = np.mean(prior_logp_timeline[-32:])
       info_str = ('     finished optimization with elbo {} vs '
-                  'best ELBO {}'.format(this_elbo, best_elbo))
+                  'best ELBO {}'.format(this_elbo_with_prior,
+                                        best_elbo_with_prior))
       util.print(info_str)
-      if best_elbo is None or best_elbo < this_elbo:
+      if (best_elbo_with_prior is None
+          or best_elbo_with_prior < this_elbo_with_prior):
 
-        best_elbo = this_elbo
-        best_timeline = this_timeline
+        best_elbo_with_prior = this_elbo_with_prior
+        best_prior_logp = this_prior_logp
+        best_timeline = elbo_with_prior_timeline
         best_lr = learning_rate_val
 
         step_size_init = sess.run(step_size_approx)
@@ -76,6 +92,9 @@ def find_best_learning_rate(elbo,
               zip(learnable_parameters.keys(), vals))
         else:
           learned_reparam = None
+
+  # Return a 'pure' ELBO for valid comparisons with other methods.
+  best_elbo = best_elbo_with_prior - best_prior_logp
 
   return (best_elbo, best_timeline, best_lr, step_size_init,
           learned_variational_params, learned_reparam)
@@ -102,14 +121,19 @@ def vectorize_log_joint_fn(log_joint_fn):
   # @tfe.function(autograph=False)
   def vectorized_log_joint_fn(*args, **kwargs):
     x1 = args[0] if len(args) > 0 else kwargs.values()[0]
-    num_inputs = tf.shape(x1)[0]
+
+    num_inputs = x1.shape[0]
+    if not x1.shape.is_fully_defined():
+      num_inputs = tf.shape(x1)[0]
 
     def loop_body(i):
       sliced_args = [tf.gather(v, i) for v in args]
       sliced_kwargs = {k: tf.gather(v, i) for k, v in kwargs.items()}
       return log_joint_fn(*sliced_args, **sliced_kwargs)
 
-    return pfor(loop_body, num_inputs)
+    result = pfor(loop_body, num_inputs)
+    result.set_shape([num_inputs])
+    return result
 
   return vectorized_log_joint_fn
 
@@ -238,7 +262,10 @@ def hmc(target, model, model_config, step_size_init, reparam=None):
       step_size=v_step_size,
       num_leapfrog_steps=FLAGS.num_leapfrog_steps,
       step_size_update_fn=make_per_chain_step_size_update_policy(
-          num_adaptation_steps=FLAGS.num_adaptation_steps, target_rate=0.75))
+          num_adaptation_steps=FLAGS.num_adaptation_steps,
+            target_rate=0.75,
+            increment_multiplier=0.05,
+            decrement_multiplier=0.05))
 
   states_orig, kernel_results = mcmc.sample_chain(
       num_results=FLAGS.num_samples,
@@ -269,8 +296,8 @@ def vectorise_transform(transform):
 def hmc_interleaved(model_config,
                     target_cp,
                     target_ncp,
-                    step_size_cp=0.1,
-                    step_size_ncp=0.1):
+                    step_size_cp,
+                    step_size_ncp):
 
   model_cp = model_config.model
 
@@ -281,18 +308,76 @@ def hmc_interleaved(model_config,
 
   initial_states = list(initial_states)
 
+  shapes = [s[0].shape for s in initial_states]
+
+  cp_step_sizes = [
+      tf.get_variable(
+          name='step_size_cp' + str(i),
+          initializer=np.array(np.ones(
+                shape=np.concatenate([[FLAGS.num_chains],
+                                      shapes[i]]).astype(int)) *
+              step_size_cp[i],
+              dtype=np.float32) / np.float32(
+                  (FLAGS.num_leapfrog_steps / 4.)**2),
+          use_resource=True,  # For TFE compatibility.
+          trainable=False) for i in range(len(step_size_cp))
+  ]
+
+  ncp_step_sizes = [
+      tf.get_variable(
+          name='step_size_ncp' + str(i),
+          initializer=np.array(np.ones(
+                shape=np.concatenate([[FLAGS.num_chains],
+                                      shapes[i]]).astype(int)) *
+              step_size_ncp[i],
+              dtype=np.float32) / np.float32(
+                  (FLAGS.num_leapfrog_steps / 4.)**2),
+          use_resource=True,  # For TFE compatibility.
+          trainable=False) for i in range(len(step_size_ncp))
+  ]
+
   vectorized_target_cp = vectorize_log_joint_fn(target_cp)
   vectorized_target_ncp = vectorize_log_joint_fn(target_ncp)
 
+  step_counter_cp = tf.compat.v1.get_variable(
+      name='step_size_adaptation_step_counter_cp',
+      initializer=np.array(-1, dtype=np.int64),
+      # Specify the dtype for variable sharing to work correctly
+      # (b/120599991).
+      dtype=tf.int64,
+      trainable=False,
+      use_resource=True)
+
+  step_counter_ncp = tf.compat.v1.get_variable(
+      name='step_size_adaptation_step_counter_ncp',
+      initializer=np.array(-1, dtype=np.int64),
+      # Specify the dtype for variable sharing to work correctly
+      # (b/120599991).
+      dtype=tf.int64,
+      trainable=False,
+      use_resource=True)
+
   inner_kernel_cp = mcmc.HamiltonianMonteCarlo(
       target_log_prob_fn=vectorized_target_cp,
-      step_size=step_size_cp,
-      num_leapfrog_steps=FLAGS.num_leapfrog_steps)
+      step_size=cp_step_sizes,
+      num_leapfrog_steps=FLAGS.num_leapfrog_steps,
+      step_size_update_fn=make_per_chain_step_size_update_policy(
+          num_adaptation_steps=FLAGS.num_adaptation_steps,
+            target_rate=0.75,
+            increment_multiplier=0.05,
+            decrement_multiplier=0.05,
+            step_counter=step_counter_cp))
 
   inner_kernel_ncp = mcmc.HamiltonianMonteCarlo(
       target_log_prob_fn=vectorized_target_ncp,
-      step_size=step_size_ncp,
-      num_leapfrog_steps=FLAGS.num_leapfrog_steps)
+      step_size=ncp_step_sizes,
+      num_leapfrog_steps=FLAGS.num_leapfrog_steps,
+      step_size_update_fn=make_per_chain_step_size_update_policy(
+          num_adaptation_steps=FLAGS.num_adaptation_steps,
+            target_rate=0.75,
+            increment_multiplier=0.05,
+            decrement_multiplier=0.05,
+            step_counter=step_counter_ncp))
 
   to_centered = model_config.to_centered
   to_noncentered = model_config.to_noncentered
