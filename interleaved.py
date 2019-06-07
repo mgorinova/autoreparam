@@ -35,10 +35,8 @@ __all__ = [
 # Not having this means subsequent calls wont trigger the warning.
 warnings.simplefilter('always')
 
-InterleavedKernelResults = collections.namedtuple(
-    'InterleavedKernelResults',
-    ['accepted_results', 'cp_accepted_results',
-     'is_accepted'])
+InterleavedKernelResults = collections.namedtuple('InterleavedKernelResults',
+                                                  ['cp_results', 'ncp_results'])
 
 
 def noop(state):
@@ -66,8 +64,12 @@ class Interleaved(TransitionKernel):
     self._seed_stream = tfp.distributions.SeedStream(seed,
                                                      'interleaved_one_step')
 
-    if (inner_kernel_cp.seed == inner_kernel_ncp.seed and
-        inner_kernel_cp.seed is not None):
+
+    # Support SimpleStepSizeAdaptation wrappers.
+    _seed = lambda k: k.inner_kernel.seed if hasattr(k, 'inner_kernel'
+                                                    ) else k.seed
+    if (_seed(inner_kernel_cp) == _seed(inner_kernel_ncp) and
+        _seed(inner_kernel_cp) is not None):
       raise Exception(
           'The two interleaved kernels cannot have the same random seed.')
 
@@ -116,25 +118,31 @@ class Interleaved(TransitionKernel):
         name=make_name(self.name, 'iterleaved', 'one_step'),
         values=[current_state, previous_kernel_results]):
 
-      blank_cp_results = self.inner_kernel['cp'].bootstrap_results(
-          current_state)
+      # Recompute log prob at new state by bootstrapping
+      cp_results = previous_kernel_results.cp_results
+      new_inner_results = self.inner_kernel[
+          'cp'].inner_kernel.bootstrap_results(current_state)
+      cp_results = cp_results._replace(inner_results=new_inner_results)
+
       # Take a step in the CP space
-      [next_cp_state, kernel_res_cp] = self.inner_kernel['cp'].one_step(
-          current_state, blank_cp_results)
+      [next_cp_state, kernel_res_cp
+      ] = self.inner_kernel['cp'].one_step(current_state, cp_results)
 
       current_ncp_state = self.to_ncp(next_cp_state)
       for i in range(len(current_ncp_state)):
         current_ncp_state[i] = tf.identity(current_ncp_state[i])
 
-      blank_ncp_results = self.inner_kernel['cp'].bootstrap_results(
-          current_ncp_state)
+      # Recompute log prob at new state by bootstrapping
+      ncp_results = previous_kernel_results.ncp_results
+      new_inner_results = self.inner_kernel[
+          'ncp'].inner_kernel.bootstrap_results(current_ncp_state)
+      ncp_results = ncp_results._replace(inner_results=new_inner_results)
 
       # Take a step in the NCP space
       [
           next_ncp_state,
           kernel_res_ncp,
-      ] = self.inner_kernel['ncp'].one_step(
-          current_ncp_state, blank_ncp_results)
+      ] = self.inner_kernel['ncp'].one_step(current_ncp_state, ncp_results)
 
       next_state = self.to_cp(next_ncp_state)
 
@@ -142,27 +150,20 @@ class Interleaved(TransitionKernel):
         next_state[i] = tf.identity(next_state[i])
 
       kernel_results = self.bootstrap_results(
-          next_state,
-          accepted_results=kernel_res_ncp,
-          cp_accepted_results=kernel_res_cp)
+          next_state, ncp_results=kernel_res_ncp, cp_results=kernel_res_cp)
 
       return next_state, kernel_results
 
-  def bootstrap_results(self,
-                        init_state,
-                        accepted_results=None,
-                        cp_accepted_results=None):
+  def bootstrap_results(self, init_state, ncp_results=None, cp_results=None):
     """Returns an object with the same type as returned by `one_step`."""
     with tf.name_scope(
         name=make_name(self.name, 'interleaved', 'bootstrap_results'),
         values=[init_state]):
 
-      if accepted_results is None:
-        accepted_results = self.inner_kernel['ncp'].bootstrap_results(init_state)
-      if cp_accepted_results is None:
-        cp_accepted_results = self.inner_kernel['cp'].bootstrap_results(init_state)
-
+      if ncp_results is None:
+        ncp_results = self.inner_kernel['ncp'].bootstrap_results(
+            self.to_ncp(init_state))
+      if cp_results is None:
+        cp_results = self.inner_kernel['cp'].bootstrap_results(init_state)
       return InterleavedKernelResults(
-          accepted_results=accepted_results,
-          cp_accepted_results=cp_accepted_results,
-          is_accepted=accepted_results.is_accepted)
+          ncp_results=ncp_results, cp_results=cp_results)

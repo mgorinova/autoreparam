@@ -179,8 +179,8 @@ def make_variational_model(model, *args, **kwargs):
 
   def get_or_init(name, shape=None):
 
-    loc_name = model.__name__ + '_' + name + '_loc'
-    scale_name = model.__name__ + '_' + name + '_scale'
+    loc_name = name + '_loc'
+    scale_name = name + '_scale'
 
     if loc_name in variational_parameters.keys() and \
        scale_name in variational_parameters.keys():
@@ -204,7 +204,7 @@ def make_variational_model(model, *args, **kwargs):
     name = rv_kwargs['name']
     if name not in kwargs.keys():
       rv = rv_constructor(*rv_args, **rv_kwargs)
-      loc, scale = get_or_init('q_' + name, rv.shape)
+      loc, scale = get_or_init(name, rv.shape)
 
       # NB: name must be the same as original variable,
       # in order to be able to do black-box VI (setting
@@ -256,7 +256,8 @@ def make_learnable_parametrisation(init_val_loc=0.,
                                    init_val_scale=0.,
                                    learnable_parameters=None,
                                    tau=1.,
-                                   parameterisation_type='exp'):
+                                   parameterisation_type='exp',
+                                   tied_pparams=False):
 
   allow_new_variables = False
   if learnable_parameters is None:
@@ -279,7 +280,10 @@ def make_learnable_parametrisation(init_val_loc=0.,
           name=loc_name + '_unconstrained',
           initializer=tf.ones(shape) * init_val_loc))
 
-      learnable_parameters[scale_name] = tf.sigmoid(tau * tf.get_variable(
+      if tied_pparams:
+        learnable_parameters[scale_name] = learnable_parameters[loc_name]
+      else:
+        learnable_parameters[scale_name] = tf.sigmoid(tau * tf.get_variable(
           name=scale_name + '_unconstrained',
           initializer=tf.ones(shape) * init_val_scale))
 
@@ -306,7 +310,7 @@ def make_learnable_parametrisation(init_val_loc=0.,
         kwargs_std['loc'] = tf.multiply(x_loc, a)
         kwargs_std['scale'] = tf.pow(x_scale,
                                      b)  # tf.multiply(x_scale - 1., b) + 1.
-        kwargs_std['name'] = name + '_param'
+        kwargs_std['name'] = name  # + '_param'
 
         scale = x_scale / kwargs_std['scale']  # tf.pow(x_scale, 1. - b)
         shift = x_loc - tf.multiply(scale, kwargs_std['loc'])
@@ -342,7 +346,7 @@ def make_learnable_parametrisation(init_val_loc=0.,
         kwargs_std['loc'] = tf.multiply(x_loc, a)
         kwargs_std['scale'] = tf.pow(x_scale,
                                      b)  # tf.multiply(x_scale - 1., b) + 1.
-        kwargs_std['name'] = name + '_param'
+        kwargs_std['name'] = name  # + '_param'
 
         scale = x_scale / kwargs_std['scale']  # tf.pow(x_scale, 1. - b)
         shift = x_loc - tf.multiply(scale, kwargs_std['loc'])

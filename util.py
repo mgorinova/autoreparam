@@ -335,8 +335,8 @@ def make_variational_model_special(model, *args, **kwargs):
 
   def get_or_init(name, a, b, shape=None):
 
-    loc_name = model.__name__ + '_' + 'q_' + name + '_loc'
-    scale_name = model.__name__ + '_' + 'q_' + name + '_scale'
+    loc_name = name + '_loc'
+    scale_name = name + '_scale'
 
     if loc_name in variational_parameters.keys() and \
         scale_name in variational_parameters.keys():
@@ -385,6 +385,25 @@ def make_variational_model_special(model, *args, **kwargs):
   _ = variational_model(*args)
 
   return variational_model, variational_parameters
+
+
+def variational_inits_from_params(learned_variational_params, param_names,
+                                  num_inits):
+  """Sample from a normal variational dist, given saved parameters."""
+  locs = collections.OrderedDict()
+  stddevs = collections.OrderedDict()
+  samples = collections.OrderedDict()
+  for k, v in learned_variational_params.items():
+    if k.endswith('_loc'):
+      locs[k[:-4]] = v
+    elif k.endswith('_scale'):
+      stddevs[k[:-6]] = v
+
+  for k in param_names:
+    shape = (num_inits,) + np.asarray(locs[k]).shape
+    samples[k] = (np.random.randn(*shape) * stddevs[k] + locs[k]).astype(
+        np.float32)
+  return samples
 
 
 def print(*args):  # pylint: disable=redefined-builtin

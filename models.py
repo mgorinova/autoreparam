@@ -36,6 +36,9 @@ from tensorflow_probability import distributions as tfd
 from tensorflow_probability import edward2 as ed
 import google3.experimental.users.davmre.autoreparam.program_transformations as ed_transforms
 
+import google3.experimental.users.davmre.autoreparam.electric as electric
+import google3.experimental.users.davmre.autoreparam.election88 as election88
+
 data_dir = '/tmp/datasets'
 
 ModelConfig = collections.namedtuple(
@@ -422,8 +425,11 @@ def get_german_credit_gammascale():
 def get_election():
 
   def election(N, n_state, black, female, state):
-    mua = ed.Normal(loc=0., scale=1., name='mua')
-    a = ed.Normal(loc=mua, scale=tf.ones(n_state), name='a')
+    mua = ed.Normal(loc=0., scale=100., name='mua')
+
+    log_sigma_a = ed.Normal(loc=0., scale=10., name='log_sigma_a')
+    a = ed.Normal(loc=mua, scale=tf.ones([n_state]) * tf.exp(log_sigma_a), name='a')
+
     b1 = ed.Normal(loc=0., scale=100., name='b1')
     b2 = ed.Normal(loc=0., scale=100., name='b2')
 
@@ -443,7 +449,7 @@ def get_election():
   observed = {'y': y}
   model_args = [N, n_state, black, female, state]
 
-  varnames = ['mua', 'a', 'b1', 'b2']
+  varnames = ['mua', 'log_sigma_a', 'a', 'b1', 'b2']
   param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
   noncentered_parameterization = {p: 0. for p in param_names}
 
@@ -467,16 +473,16 @@ def get_electric():
     C_grade_pair = tf.one_hot(grade_pair, n_grade_pair)  # 96 x 4
 
     mua = ed.Normal(loc=0., scale=tf.ones(n_grade_pair), name='mua')  # 4
-    mua_hat = 100 * tf.matmul(C_grade_pair, tf.expand_dims(mua, 1))  # 96
+    mua_hat = 100 * tf.matmul(C_grade_pair, mua[..., tf.newaxis])  # 96
 
     sigma_y = ed.Normal(loc=0., scale=tf.ones(n_grade), name='sigma_y')  # 4
-    sigma_y_hat = tf.matmul(C_grade, tf.expand_dims(sigma_y, 1))  # 192
+    sigma_y_hat = tf.matmul(C_grade, sigma_y[..., tf.newaxis])  # 192
 
     a = ed.Normal(loc=mua_hat, scale=1., name='a')  # 96
     b = ed.Normal(loc=0., scale=100 * tf.ones(n_grade), name='b')  # 4
 
     y_hat_a = tf.reshape(tf.matmul(C_pair, a), [N])
-    y_hat_b = tf.reshape(tf.matmul(C_grade, tf.expand_dims(b, 1)), [N])
+    y_hat_b = tf.reshape(tf.matmul(C_grade, b[..., tf.newaxis]), [N])
     y_hat_sigma = tf.exp(tf.reshape(sigma_y_hat, [N]))
 
     y_hat = y_hat_a + tf.multiply(y_hat_b, treatment)
@@ -520,18 +526,22 @@ def get_time_series():
     sigma_mu = ed.Normal(loc=0., scale=1., name='sigma_mu')
     #sigma_y = ed.Normal(loc=0.,scale=1., name="sigma_y")
 
-    alpha = [ed.Normal(loc=0., scale=tf.exp(sigma_alpha), name='alpha0')]
-    mu = [ed.Normal(loc=0., scale=tf.exp(sigma_mu), name='mu0')]
+    alpha = [
+        ed.Normal(loc=0., scale=tf.nn.softplus(sigma_alpha), name='alpha0')
+    ]
+    mu = [ed.Normal(loc=0., scale=tf.nn.softplus(sigma_mu), name='mu0')]
 
     for t in range(1, T):
       alpha.append(
           ed.Normal(
               loc=alpha[t - 1] + mu[t - 1],
-              scale=tf.exp(sigma_alpha),
+              scale=tf.nn.softplus(sigma_alpha),
               name='alpha{}'.format(t)))
       mu.append(
           ed.Normal(
-              loc=mu[t - 1], scale=tf.exp(sigma_mu), name='mu{}'.format(t)))
+              loc=mu[t - 1],
+              scale=tf.nn.softplus(sigma_mu),
+              name='mu{}'.format(t)))
 
     beta = ed.Normal(loc=0., scale=1., name='beta')
 
