@@ -15,15 +15,15 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 from tensorflow_probability import edward2 as ed
 
-import google3.experimental.users.davmre.autoreparam.inference as inference
-import google3.experimental.users.davmre.autoreparam.graphs as graphs
-import google3.experimental.users.davmre.autoreparam.models as models
-import google3.experimental.users.davmre.autoreparam.util as util
+import inference
+import graphs
+import models
+import util
 
-import google3.experimental.users.davmre.autoreparam.program_transformations as ed_transforms
+import program_transformations as ed_transforms
 
 from tensorflow_probability.python import mcmc
-from google3.third_party.tensorflow.python.ops.parallel_for import pfor
+from tensorflow.python.ops.parallel_for import pfor
 
 import json
 

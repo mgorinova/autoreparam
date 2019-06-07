@@ -37,9 +37,9 @@ from tensorflow_probability.python.edward2.generated_random_variables import Nor
 from tensorflow_probability.python.edward2.interceptor import tape
 from tensorflow_probability.python.edward2.program_transformations import make_log_joint_fn
 
-from google3.third_party.tensorflow.python.ops.parallel_for import pfor
+from tensorflow.python.ops.parallel_for import pfor
 
-import google3.experimental.users.davmre.autoreparam.program_transformations as program_transformations
+import program_transformations
 
 FLAGS = tf.app.flags.FLAGS
 

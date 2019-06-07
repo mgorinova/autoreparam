@@ -9,13 +9,14 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 from tensorflow_probability import edward2 as ed
 import numpy as np
-import google3.experimental.users.davmre.autoreparam.util as util
-import google3.experimental.users.davmre.autoreparam.interleaved as interleaved
+
+import util
+import interleaved
 
 from tensorflow_probability.python import mcmc
-from google3.third_party.tensorflow.python.ops.parallel_for import pfor
+from tensorflow.python.ops.parallel_for import pfor
 
-from google3.third_party.tensorflow.python.framework import smart_cond
+from tensorflow.python.framework import smart_cond
 
 FLAGS = tf.app.flags.FLAGS
 

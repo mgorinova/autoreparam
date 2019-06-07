@@ -34,10 +34,10 @@ from tensorflow_probability import bijectors as tfb
 from tensorflow_probability import distributions as tfd
 
 from tensorflow_probability import edward2 as ed
-import google3.experimental.users.davmre.autoreparam.program_transformations as ed_transforms
+import program_transformations as ed_transforms
 
-import google3.experimental.users.davmre.autoreparam.electric as electric
-import google3.experimental.users.davmre.autoreparam.election88 as election88
+import electric
+import election88
 
 data_dir = '/tmp/datasets'
 
