@@ -59,7 +59,7 @@ flags.DEFINE_boolean(
 
 flags.DEFINE_boolean(
     'tied_pparams',
-    default=False,
+    default=True,
     help='Whether to tie the loc and scale parameterisation parameters '
          'together as a single parameter (a=b)'
     )
