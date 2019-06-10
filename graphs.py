@@ -98,7 +98,9 @@ def make_ncp_graph(model_config):
   return target_ncp, model_ncp, elbo, variational_parameters, None
 
 
-def make_cvip_graph(model_config, parameterisation_type='exp'):
+def make_cvip_graph(model_config,
+                    parameterisation_type='exp',
+                    tied_pparams=False):
   """
                 Constructs the cVIP graph of the given model.
                 Resets the default TF graph.
@@ -110,7 +112,8 @@ def make_cvip_graph(model_config, parameterisation_type='exp'):
 
   (learnable_parameters, learnable_parametrisation,
    _) = ed_transforms.make_learnable_parametrisation(
-       tau=1., parameterisation_type=parameterisation_type)
+       tau=1., parameterisation_type=parameterisation_type,
+       tied_pparams=tied_pparams)
 
   def model_vip(*params):
     with ed.interception(learnable_parametrisation):
