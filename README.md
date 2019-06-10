@@ -1,5 +1,8 @@
 # Automatic Reparameterisation of Probabilistic Programs
 
+This repository contains code associated with the paper:
+
+M. I. Gorinova, D. Moore, and M. D. Hoffman. [*Automatic Reparameterisation of Probabilistic Programs*](https://arxiv.org/abs/1906.03028). 2019.
 
 
 ## Usage
