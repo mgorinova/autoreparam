@@ -1,4 +1,4 @@
-# Automatic Reparameterisation in Probabilistic Programming
+# Automatic Reparameterisation of Probabilistic Programs
 
 
 
