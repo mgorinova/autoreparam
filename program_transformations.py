@@ -29,6 +29,8 @@ from tensorflow_probability.python.edward2.generated_random_variables import Nor
 from tensorflow_probability.python.edward2.interceptor import interceptable
 from tensorflow_probability.python.edward2.interceptor import interception
 
+from tensorflow_probability.python import edward2
+
 __all__ = [
     'make_log_joint_fn', 'make_variational_model', 'make_value_setter', 'ncp',
     'get_trace'
@@ -248,6 +250,48 @@ def ncp(rv_constructor, *rv_args, **rv_kwargs):
 
     return b.forward(rv_std)
 
+  elif ((rv_constructor.__name__.startswith('MultivariateNormal')
+            or rv_constructor.__name__.startswith('GaussianProcess'))
+            and not rv_kwargs['name'].startswith('y')):
+
+    name = rv_kwargs['name']
+
+    if rv_constructor.__name__.startswith('GaussianProcess'):
+      gp_dist = rv_constructor(*rv_args, **rv_kwargs).distribution
+      X = gp_dist._get_index_points()
+      x_loc = gp_dist.mean_fn(X)
+      x_cov = gp_dist._compute_covariance(index_points=X)
+      shape = edward2.MultivariateNormalFullCovariance(x_loc,
+                                                       x_cov,
+                                                       name='yignoreme').shape
+
+    else:
+      x_loc = rv_kwargs['loc']
+      x_cov = rv_kwargs['covariance_matrix']
+      shape = rv_constructor(*rv_args, **rv_kwargs).shape
+
+    Lambda, Q = tf.linalg.eigh(x_cov)
+
+    kwargs_std = {}
+
+    kwargs_std['loc'] = tf.zeros(shape)
+    kwargs_std['covariance_matrix'] = tf.eye(int(shape[0]))
+    kwargs_std['name'] = name + '_std'
+
+    scale = tf.matmul(Q, tf.linalg.diag(tf.sqrt(Lambda)))
+    b = tfb.AffineLinearOperator(scale=tf.linalg.LinearOperatorFullMatrix(scale),
+                                 shift=x_loc)
+    if 'value' in rv_kwargs:
+      kwargs_std['value'] = b.inverse(rv_kwargs['value'])
+
+    if rv_constructor.__name__.startswith('GaussianProcess'):
+      rv_std = edward2.MultivariateNormalFullCovariance(*rv_args, **kwargs_std)
+
+    else:
+      rv_std = interceptable(rv_constructor)(*rv_args, **kwargs_std)
+
+    return b.forward(rv_std)
+
   else:
     return interceptable(rv_constructor)(*rv_args, **rv_kwargs)
 
@@ -258,7 +302,6 @@ def make_learnable_parametrisation(init_val_loc=0.,
                                    tau=1.,
                                    parameterisation_type='exp',
                                    tied_pparams=False):
-
   allow_new_variables = False
   if learnable_parameters is None:
     learnable_parameters = collections.OrderedDict()
@@ -269,16 +312,16 @@ def make_learnable_parametrisation(init_val_loc=0.,
     scale_name = name + '_b'
 
     if loc_name in learnable_parameters.keys() and \
-      scale_name in learnable_parameters.keys():
+            scale_name in learnable_parameters.keys():
       return learnable_parameters[loc_name], learnable_parameters[scale_name]
     else:
       if not allow_new_variables:
         raise Exception('trying to create a variable for {}, but '
                         'parameterization was already passed in ({})'.format(
-                            name, learnable_parameters))
+          name, learnable_parameters))
       learnable_parameters[loc_name] = tf.sigmoid(tau * tf.get_variable(
-          name=loc_name + '_unconstrained',
-          initializer=tf.ones(shape) * init_val_loc))
+        name=loc_name + '_unconstrained',
+        initializer=tf.ones(shape) * init_val_loc))
 
       if tied_pparams:
         learnable_parameters[scale_name] = learnable_parameters[loc_name]
@@ -295,7 +338,7 @@ def make_learnable_parametrisation(init_val_loc=0.,
 
     def recenter(rv_constructor, *rv_args, **rv_kwargs):
       if (rv_constructor.__name__ == 'Normal' and
-          not rv_kwargs['name'].startswith('y')):
+              not rv_kwargs['name'].startswith('y')):
 
         # NB: assume everything is kwargs for now.
         x_loc = rv_kwargs['loc']
@@ -322,39 +365,67 @@ def make_learnable_parametrisation(init_val_loc=0.,
         bijectors[name] = b
         return b.forward(rv_std)
 
-      else:
-        return interceptable(rv_constructor)(*rv_args, **rv_kwargs)
+      elif ((rv_constructor.__name__.startswith('MultivariateNormal')
+             or rv_constructor.__name__.startswith('GaussianProcess'))
+            and not rv_kwargs['name'].startswith('y')):
 
-    return learnable_parameters, recenter, bijectors
-
-  elif parameterisation_type == 'scale':
-
-    def recenter(rv_constructor, *rv_args, **rv_kwargs):
-      if (rv_constructor.__name__ == 'Normal' and
-          not rv_kwargs['name'].startswith('y')):
-
-        # NB: assume everything is kwargs for now.
-        x_loc = rv_kwargs['loc']
-        x_scale = rv_kwargs['scale']
-
+        print(rv_constructor.__name__)
         name = rv_kwargs['name']
-        shape = rv_constructor(*rv_args, **rv_kwargs).shape
 
-        a, b = get_or_init(name, shape)  # w
+        if rv_constructor.__name__.startswith('GaussianProcess'):
+          gp_dist = rv_constructor(*rv_args, **rv_kwargs).distribution
+          X = gp_dist._get_index_points()
+          x_loc = gp_dist.mean_fn(X)
+          x_cov = gp_dist._compute_covariance(index_points=X)
+          # FIXME: shouldn't need to use the name of the var to ignore it...
+          shape = edward2.MultivariateNormalFullCovariance(
+            x_loc, x_cov, name='yignoreme').shape
+
+        else:
+          x_loc = rv_kwargs['loc']
+          x_cov = rv_kwargs['covariance_matrix']
+          shape = rv_constructor(*rv_args, **rv_kwargs).shape
+
+        a, b = get_or_init(name, shape)
+
+        Lambda, Q = tf.linalg.eigh(x_cov)
+        Lambda_hat_b = tf.pow(Lambda, b)
+        Q_T = tf.transpose(Q)
 
         kwargs_std = {}
         kwargs_std['loc'] = tf.multiply(x_loc, a)
-        kwargs_std['scale'] = tf.pow(x_scale,
-                                     b)  # tf.multiply(x_scale - 1., b) + 1.
+        kwargs_std['covariance_matrix'] = tf.matmul(
+          tf.matmul(Q, tf.linalg.diag(Lambda_hat_b)),
+          Q_T)  # Q.Lambda_hat_b.Q^T
+
         kwargs_std['name'] = name  # + '_param'
 
-        scale = x_scale / kwargs_std['scale']  # tf.pow(x_scale, 1. - b)
-        shift = x_loc - tf.multiply(scale, kwargs_std['loc'])
-        b = tfb.AffineScalar(scale=scale, shift=shift)
+        L = tf.matmul(Q, tf.linalg.diag(tf.sqrt(Lambda)))
+
+        eye_size = int(shape[0])
+
+        L_hat_inv = tf.cond(tf.reduce_all(tf.equal(Lambda_hat_b, tf.ones(eye_size))),
+                            true_fn=lambda: tf.eye(eye_size),
+                            false_fn=lambda: tf.matmul(
+                              tf.linalg.diag(1. / tf.sqrt(Lambda_hat_b)), Q_T))
+
+        scale = tf.matmul(L, L_hat_inv)
+
+        shift = tf.expand_dims(x_loc, 1) - \
+                tf.matmul(scale, tf.expand_dims(kwargs_std['loc'], 1))
+        shift = tf.squeeze(shift)
+
+        b = tfb.AffineLinearOperator(scale=tf.linalg.LinearOperatorFullMatrix(scale),
+                                     shift=shift)
         if 'value' in rv_kwargs:
           kwargs_std['value'] = b.inverse(rv_kwargs['value'])
 
-        rv_std = interceptable(rv_constructor)(*rv_args, **kwargs_std)
+        if rv_constructor.__name__.startswith('GaussianProcess'):
+          rv_std = edward2.MultivariateNormalFullCovariance(*rv_args, **kwargs_std)
+
+        else:
+          rv_std = interceptable(rv_constructor)(*rv_args, **kwargs_std)
+
         bijectors[name] = b
         return b.forward(rv_std)
 

@@ -35,6 +35,7 @@ from tensorflow_probability import distributions as tfd
 
 from tensorflow_probability import edward2 as ed
 import program_transformations as ed_transforms
+from tensorflow_probability import positive_semidefinite_kernels as psd_kernels
 
 import electric
 import election88
@@ -97,7 +98,8 @@ def make_to_noncentered(model, model_args, observed_data={}):
 def get_eight_schools():
   """Eight schools model."""
   num_schools = 8
-  treatment_effects = np.array([28, 8, -3, 7, -1, 1, 18, 12], dtype=np.float32)
+  treatment_effects = np.array([28, 8, -3, 7, -1, 1, 18, 12],
+                               dtype=np.float32)
   treatment_stddevs = np.array([15, 10, 16, 11, 9, 11, 10, 18],
                                dtype=np.float32)
 
@@ -125,6 +127,90 @@ def get_eight_schools():
       schools_model, model_args=model_args, observed_data=observed)
 
   return ModelConfig(schools_model, model_args, observed, to_centered,
+                     to_noncentered, make_to_centered)
+
+
+def get_multivariate_simple():
+  dim = 3
+  scale = np.identity(3, dtype=np.float32)
+
+  num_datapoints = 4
+  data = np.array([[0., 1., 0.],
+                   [-0.2, 1.1, 0.1],
+                   [0.5, 1.2, 0.2],
+                   [1., -0.2, -1.2]], dtype=np.float32)
+
+  def multivariate_normal_model(num_datapoints):
+    A = ed.Wishart(df=dim, scale=scale, name='A')
+    x = ed.MultivariateNormalFullCovariance(
+      loc=tf.zeros(dim), covariance_matrix=A, name='x')
+    loc = tf.ones([num_datapoints, 1]) * x
+    y = ed.Normal(loc=loc, scale=1., name='y')
+    return y
+
+  model_args = [num_datapoints]
+  observed = {'y': data}
+
+  varnames = ['V', 'x']
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
+  noncentered_parameterization = {p: 0. for p in param_names}
+
+  make_to_centered = build_make_to_centered(
+    multivariate_normal_model, model_args=model_args, observed_data=observed)
+  to_centered = make_to_centered(**noncentered_parameterization)
+  to_noncentered = make_to_noncentered(
+    multivariate_normal_model, model_args=model_args, observed_data=observed)
+
+  return ModelConfig(multivariate_normal_model, model_args, observed, to_centered,
+                     to_noncentered, make_to_centered)
+
+
+def get_gp_classification():
+  num_train_points = 3
+  num_dims = 2
+
+  X_train = np.random.rand(num_train_points, num_dims).astype(np.float32)
+  y_lbls = (np.random.uniform(0, 1, num_train_points) > 0.7).astype(np.int32)
+
+  def gp_classification_model(index_points):
+    # Define an exponentiated-quadratic kernel with priors on kernel hyperparams.
+    # We parameterize in logspace so all variables are unconstrained.
+    kernel_log_lengthscale = ed.Normal(loc=0., scale=1., name='kernel_log_lengthscale')
+    kernel_log_amplitude = ed.Normal(loc=0., scale=1., name='kernel_log_amplitude')
+    kernel = psd_kernels.ExponentiatedQuadratic(
+      amplitude=tf.exp(kernel_log_amplitude),
+      length_scale=tf.exp(kernel_log_lengthscale))
+
+    # Also set a prior on the observation noise scale.
+    observation_noise_log_scale = ed.Normal(loc=-2., scale=1.,
+                                            name='observation_noise_log_scale')
+    observation_noise_variance = tf.exp(2 * observation_noise_log_scale)
+
+    # Define a GP->Bernoulli model over the given index points.
+    latent_logits = ed.GaussianProcess(
+      kernel=kernel,
+      index_points=index_points,
+      observation_noise_variance=observation_noise_variance,
+      name='latent_logits')
+
+    y_labels = ed.Bernoulli(logits=latent_logits, name='y_labels')
+    return y_labels
+
+  model_args = [X_train]
+  observed = {'y_labels': y_lbls}
+
+  varnames = ['kernel_log_lengthscale', 'kernel_log_amplitude',
+              'observation_noise_log_scale', 'latent_logits']
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
+  noncentered_parameterization = {p: 0. for p in param_names}
+
+  make_to_centered = build_make_to_centered(
+    gp_classification_model, model_args=model_args, observed_data=observed)
+  to_centered = make_to_centered(**noncentered_parameterization)
+  to_noncentered = make_to_noncentered(
+    gp_classification_model, model_args=model_args, observed_data=observed)
+
+  return ModelConfig(gp_classification_model, model_args, observed, to_centered,
                      to_noncentered, make_to_centered)
 
 
@@ -177,14 +263,14 @@ def load_radon_data(state_code):
   # Non-NaN possibilities: MN, IN, MO, ND, PA
 
   with open_from_url(
-      'http://www.stat.columbia.edu/~gelman/arm/examples/radon/srrs2.dat') as f:
+    'http://www.stat.columbia.edu/~gelman/arm/examples/radon/srrs2.dat') as f:
     srrs2 = pd.read_csv(f)
   srrs2.columns = srrs2.columns.map(str.strip)
   srrs_mn = srrs2.assign(fips=srrs2.stfips * 1000 +
                          srrs2.cntyfips)[srrs2.state == state_code]
 
   with open_from_url(
-      'http://www.stat.columbia.edu/~gelman/arm/examples/radon/cty.dat') as f:
+    'http://www.stat.columbia.edu/~gelman/arm/examples/radon/cty.dat') as f:
     cty = pd.read_csv(f)
   cty_mn = cty[cty.st == state_code].copy()
   cty_mn['fips'] = 1000 * cty_mn.stfips + cty_mn.ctfips
@@ -322,7 +408,7 @@ def get_radon(state_code='MN'):
 def load_german_credit_data():
   """Load the German credit dataset."""
   with open_from_url(
-      'https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data'  # pylint: disable=line-too-long
+   'https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data'  # pylint: disable=line-too-long
   ) as f:
     data = pd.read_csv(f, delim_whitespace=True, header=None)
 
@@ -331,8 +417,7 @@ def load_german_credit_data():
     return np.array([d[i] for i in x])
 
   categoricals = []
-  numericals = []
-  numericals.append(np.ones([len(data)]))
+  numericals = [np.ones([len(data)])]
   for column in data.columns[:-1]:
     column = data[column]
     if column.dtype == 'O':
@@ -524,7 +609,7 @@ def get_time_series():
 
     sigma_alpha = ed.Normal(loc=0., scale=1., name='sigma_alpha')
     sigma_mu = ed.Normal(loc=0., scale=1., name='sigma_mu')
-    #sigma_y = ed.Normal(loc=0.,scale=1., name="sigma_y")
+    # sigma_y = ed.Normal(loc=0.,scale=1., name="sigma_y")
 
     alpha = [
         ed.Normal(loc=0., scale=tf.nn.softplus(sigma_alpha), name='alpha0')
@@ -564,8 +649,8 @@ def get_time_series():
       396.52, 398.65, 400.83, 404.24, 406.55, 408.52
   ]
 
-  #x = x[-5:]
-  #y = y[-5:]
+  # x = x[-5:]
+  # y = y[-5:]
 
   T = len(x)
 
@@ -575,7 +660,7 @@ def get_time_series():
   varnames = [
       'beta',
       'sigma_alpha',
-      'sigma_mu',  #'sigma_y'
+      'sigma_mu',  # 'sigma_y'
   ] + ['alpha{}'.format(i) for i in range(T)] + ['mu{}'.format(i) for i in range(T)]
   param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
   noncentered_parameterization = {p: 0. for p in param_names}

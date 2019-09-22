@@ -4,7 +4,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import os, time
+import os
+import time
 import collections
 from collections import OrderedDict
 
@@ -55,7 +56,7 @@ flags.DEFINE_boolean(
     'discrete_prior',
     default=False,
     help='Whether to use a prior encouraging the parameterisation parameters'
-          'to be 0 or 1.')
+         'to be 0 or 1.')
 
 flags.DEFINE_boolean(
     'tied_pparams',
@@ -93,7 +94,9 @@ flags.DEFINE_integer(
     'num_samples', default=50000, help='Number of HMC samples.')
 
 flags.DEFINE_integer(
-    'num_tuning_samples', default=10000, help='Number of HMC samples to tune the chains.')
+    'num_tuning_samples',
+    default=10000,
+    help='Number of HMC samples to tune the chains.')
 
 flags.DEFINE_integer('num_chains', default=100, help='Number of HMC chains.')
 
@@ -106,7 +109,6 @@ flags.DEFINE_integer(
 flags.DEFINE_string('f', default='', help='kernel')
 
 FLAGS = flags.FLAGS
-
 
 def create_target_graph(model_config, results_dir):
 
@@ -198,11 +200,11 @@ def tune_leapfrog_steps(model_config, num_tuning_samples, initial_step_size,
      learnable_parameters, actual_reparam) = create_target_graph(
             model_config, results_dir)
 
-    (states_orig, kernel_results, states, ess) = \
-      inference.hmc(target, model, model_config,
-                    initial_step_size,
-                    initial_states=initial_states,
-                    reparam=actual_reparam)
+    (states_orig, kernel_results, states, ess) = inference.hmc(
+       target, model, model_config,
+       initial_step_size,
+       initial_states=initial_states,
+       reparam=actual_reparam)
 
     init = tf.global_variables_initializer()
     with tf.Session() as sess:
@@ -210,7 +212,7 @@ def tune_leapfrog_steps(model_config, num_tuning_samples, initial_step_size,
       init.run()
       ess_final = sess.run(ess)
 
-    #ess_final = [e / FLAGS.num_leapfrog_steps for e in ess_final]
+    # ess_final = [e / FLAGS.num_leapfrog_steps for e in ess_final]
     ess_min, sem_min = util.get_min_ess(ess_final)
     ess_min = ess_min / FLAGS.num_leapfrog_steps
     sem_min = sem_min / FLAGS.num_leapfrog_steps
@@ -226,7 +228,7 @@ def tune_leapfrog_steps(model_config, num_tuning_samples, initial_step_size,
 
 def main(_):
 
-  #tf.logging.set_verbosity(tf.logging.ERROR)
+  # tf.logging.set_verbosity(tf.logging.ERROR)
   np.warnings.filterwarnings('ignore')
 
   util.print('Loading model {} with dataset {}.'.format(FLAGS.model,
@@ -252,6 +254,12 @@ def main(_):
     model_config = models.get_time_series()
   elif FLAGS.model == 'neals_funnel':
     model_config = models.get_neals_funnel()
+  elif FLAGS.model == 'multivariate_simple':
+    model_config = models.get_multivariate_simple()
+  elif FLAGS.model == 'gp_classification':
+    # Needed due to no pfor conversion for SelfAdjointEigV2 and MatrixDiag
+    FLAGS.op_conversion_fallback_to_while_loop = True
+    model_config = models.get_gp_classification()
   else:
     raise Exception('unknown model {}'.format(FLAGS.model))
 
@@ -336,8 +344,8 @@ def run_vi(model_config, results_dir, file_path):
    'actual_num_variational_steps': len(elbo_timeline),
    'estimated_elbo_std': (np.std(elbo_timeline[-32:])).item(),
    'learning_rate': learning_rate,
-   'initial_step_size': [i.item() if np.isscalar(i) else i.tolist() \
-              for i in initial_step_size],
+   'initial_step_size': [i.item() if np.isscalar(i) else i.tolist()
+                         for i in initial_step_size],
    'learned_reparam': clean_dict(learned_reparam),
    'learned_variational_params': clean_dict(learned_variational_params),
   }
@@ -384,12 +392,12 @@ def run_hmc(model_config, results_dir, file_path):
   (target, model, elbo, variational_parameters, learnable_parameters,
    actual_reparam) = create_target_graph(model_config, results_dir)
 
-  (states_orig, kernel_results, states, ess) = \
-    inference.hmc(target, model, model_config, initial_step_size,
-                  initial_states=initial_states,
-                  reparam=(actual_reparam
-                           if actual_reparam is not None
-                           else learned_reparam))
+  (states_orig, kernel_results, states, ess) = inference.hmc(
+      target, model, model_config, initial_step_size,
+      initial_states=initial_states,
+      reparam=(actual_reparam
+               if actual_reparam is not None
+               else learned_reparam))
 
   init = tf.global_variables_initializer()
   with tf.Session() as sess:
@@ -432,21 +440,21 @@ def run_hmc(model_config, results_dir, file_path):
 
 
 def run_interleaved_hmc_with_leapfrog_steps(
-    model_config, results_dir, num_leapfrog_steps_cp, num_leapfrog_steps_ncp,
-    initial_step_size_cp, initial_step_size_ncp, initial_states_cp):
+  model_config, results_dir, num_leapfrog_steps_cp, num_leapfrog_steps_ncp,
+  initial_step_size_cp, initial_step_size_ncp, initial_states_cp):
 
   (target, model, elbo, variational_parameters, learnable_parameters,
    actual_reparam) = create_target_graph(model_config, results_dir)
 
   target_cp, target_ncp = target
 
-  (states, kernel_results, ess) = \
-   inference.hmc_interleaved(model_config, target_cp, target_ncp,
-                             num_leapfrog_steps_cp=num_leapfrog_steps_cp,
-                             num_leapfrog_steps_ncp=num_leapfrog_steps_ncp,
-                             step_size_cp=initial_step_size_cp,
-                             step_size_ncp=initial_step_size_ncp,
-                             initial_states_cp=initial_states_cp,)
+  (states, kernel_results, ess) = inference.hmc_interleaved(
+    model_config, target_cp, target_ncp,
+    num_leapfrog_steps_cp=num_leapfrog_steps_cp,
+    num_leapfrog_steps_ncp=num_leapfrog_steps_ncp,
+    step_size_cp=initial_step_size_cp,
+    step_size_ncp=initial_step_size_ncp,
+    initial_states_cp=initial_states_cp,)
 
   init = tf.global_variables_initializer()
   with tf.Session() as sess:
@@ -605,12 +613,14 @@ def save_ess(file_path_base,
       out_f.write('{} stddev: {}\n\n'.format(k, np.std(v, axis=0)))
 
   if num_chains_to_save > 0:
-    dict_res = dict([(param_names[i], samples[i][:, :num_chains_to_save]) for i in range(len(param_names))])
+    dict_res = dict([(param_names[i], samples[i][:, :num_chains_to_save])
+                     for i in range(len(param_names))])
     np_path = file_path_base + '{}.npz'.format(i)
     with tf.gfile.GFile(np_path, 'wb') as out_f:
       io_buffer = io.BytesIO()
       np.savez(io_buffer, **dict_res)
       out_f.write(io_buffer.getvalue())
+
 
 if __name__ == '__main__':
   tf.app.run()
