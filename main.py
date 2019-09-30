@@ -28,7 +28,7 @@ from tensorflow.python.ops.parallel_for import pfor
 
 import json
 
-flags = tf.app.flags
+flags = tf.compat.v1.app.flags
 
 flags.DEFINE_string('model', default='8schools', help='Model to be used.')
 
@@ -145,7 +145,7 @@ def create_target_graph(model_config, results_dir):
            parameterisation_type=FLAGS.learnable_parmeterisation_type,
            tied_pparams=FLAGS.tied_pparams)
     else:
-      with tf.gfile.Open(cVIP_path, 'r') as f:
+      with tf.io.gfile.GFile(cVIP_path, 'r') as f:
         prev_results = json.load(f)
         actual_reparam = prev_results['learned_reparam']
 
@@ -156,8 +156,8 @@ def create_target_graph(model_config, results_dir):
              parameterisation_type=FLAGS.learnable_parmeterisation_type)
 
   elif FLAGS.method == 'dVIP':
-    if tf.gfile.Exists(cVIP_path):
-      with tf.gfile.Open(cVIP_path, 'r') as f:
+    if tf.io.gfile.exists(cVIP_path):
+      with tf.io.gfile.GFile(cVIP_path, 'r') as f:
         prev_results = json.load(f)
         reparam = prev_results['learned_reparam']
     else:
@@ -206,8 +206,8 @@ def tune_leapfrog_steps(model_config, num_tuning_samples, initial_step_size,
        initial_states=initial_states,
        reparam=actual_reparam)
 
-    init = tf.global_variables_initializer()
-    with tf.Session() as sess:
+    init = tf.compat.v1.global_variables_initializer()
+    with tf.compat.v1.Session() as sess:
 
       init.run()
       ess_final = sess.run(ess)
@@ -257,9 +257,9 @@ def main(_):
   elif FLAGS.model == 'multivariate_simple':
     model_config = models.get_multivariate_simple()
   elif FLAGS.model == 'gp_classification':
-    # Needed due to no pfor conversion for SelfAdjointEigV2 and MatrixDiag
-    FLAGS.op_conversion_fallback_to_while_loop = True
     model_config = models.get_gp_classification()
+  elif FLAGS.model == 'gp_poisson':
+    model_config = models.get_gp_poisson()
   else:
     raise Exception('unknown model {}'.format(FLAGS.model))
 
@@ -268,8 +268,8 @@ def main(_):
   else:
     results_dir = FLAGS.results_dir
 
-  if not tf.gfile.Exists(results_dir):
-    tf.gfile.MakeDirs(results_dir)
+  if not tf.io.gfile.exists(results_dir):
+    tf.io.gfile.makedirs(results_dir)
 
   filename = '{}{}{}{}{}.json'.format(
       FLAGS.method,
@@ -297,9 +297,9 @@ def main(_):
 
 def run_vi(model_config, results_dir, file_path):
   (target, model, elbo, variational_parameters, learnable_parameters,
-   actual_reparam) = create_target_graph(model_config, results_dir)
+  actual_reparam) = create_target_graph(model_config, results_dir)
 
-  if tf.gfile.Exists(file_path):
+  if tf.io.gfile.exists(file_path):
     util.print(
         'Already ran experiment {}-{} on model {} with dataset {}. Skipping'
         .format(FLAGS.inference, FLAGS.method, FLAGS.model, FLAGS.dataset))
@@ -350,13 +350,13 @@ def run_vi(model_config, results_dir, file_path):
    'learned_variational_params': clean_dict(learned_variational_params),
   }
 
-  with tf.gfile.Open(file_path, 'w') as outfile:
+  with tf.io.gfile.GFile(file_path, 'w') as outfile:
     json.dump(results, outfile)
 
 
 def run_hmc(model_config, results_dir, file_path):
-  if tf.gfile.Exists(file_path):
-    with tf.gfile.Open(file_path, 'r') as f:
+  if tf.io.gfile.exists(file_path):
+    with tf.io.gfile.GFile(file_path, 'r') as f:
       prev_results = json.load(f)
   else:
     raise Exception('Run VI first to find initial step sizes')
@@ -382,7 +382,7 @@ def run_hmc(model_config, results_dir, file_path):
         initial_states=initial_states,
         results_dir=results_dir)
   FLAGS.num_leapfrog_steps = num_ls
-  with tf.gfile.Open(file_path, 'w') as f:
+  with tf.io.gfile.GFile(file_path, 'w') as f:
     prev_results['num_leapfrog_steps'] = FLAGS.num_leapfrog_steps
     json.dump(prev_results, f)
 
@@ -399,8 +399,8 @@ def run_hmc(model_config, results_dir, file_path):
                if actual_reparam is not None
                else learned_reparam))
 
-  init = tf.global_variables_initializer()
-  with tf.Session() as sess:
+  init = tf.compat.v1.global_variables_initializer()
+  with tf.compat.v1.Session() as sess:
 
     init.run()
 
@@ -456,8 +456,8 @@ def run_interleaved_hmc_with_leapfrog_steps(
     step_size_ncp=initial_step_size_ncp,
     initial_states_cp=initial_states_cp,)
 
-  init = tf.global_variables_initializer()
-  with tf.Session() as sess:
+  init = tf.compat.v1.global_variables_initializer()
+  with tf.compat.v1.Session() as sess:
 
     init.run()
 
@@ -504,14 +504,14 @@ def run_interleaved_hmc(model_config, results_dir, file_path):
       k for k in list(model_tape.keys()) if k not in model_config.observed_data
   ]
 
-  if tf.gfile.Exists(file_path_cp) and tf.gfile.Exists(file_path_ncp):
-    with tf.gfile.Open(file_path_cp, 'r') as f:
+  if tf.io.gfile.exists(file_path_cp) and tf.io.gfile.exists(file_path_ncp):
+    with tf.io.gfile.GFile(file_path_cp, 'r') as f:
       prev_results = json.load(f)
       initial_step_size_cp = prev_results['initial_step_size']
       num_leapfrog_steps_cp = prev_results['num_leapfrog_steps']
       learned_variational_params_cp = prev_results['learned_variational_params']
 
-    with tf.gfile.Open(file_path_ncp, 'r') as f:
+    with tf.io.gfile.GFile(file_path_ncp, 'r') as f:
       prev_results = json.load(f)
       initial_step_size_ncp = prev_results['initial_step_size']
       num_leapfrog_steps_ncp = prev_results['num_leapfrog_steps']
@@ -582,7 +582,7 @@ def save_hmc_results(results, file_path, **kwargs):
   for k, v in kwargs.items():
     results.get(k).append(v)  # TODO .item()
 
-  with tf.gfile.Open(file_path, 'w') as outfile:
+  with tf.io.gfile.GFile(file_path, 'w') as outfile:
     json.dump(results, outfile)
 
 
@@ -598,13 +598,13 @@ def save_ess(file_path_base,
   # Work around issues saving np arrays directly to network
   # filesystems, by first saving to an in-memory IO buffer.
   np_path = file_path_base + '_ess_{}.npz'.format(i)
-  with tf.gfile.GFile(np_path, 'wb') as out_f:
+  with tf.io.gfile.GFile(np_path, 'wb') as out_f:
     io_buffer = io.BytesIO()
     np.savez(io_buffer, **dict_ess)
     out_f.write(io_buffer.getvalue())
 
   txt_path = file_path_base + '_ess_{}.txt'.format(i)
-  with tf.gfile.GFile(txt_path, 'w') as out_f:
+  with tf.io.gfile.GFile(txt_path, 'w') as out_f:
     for k, v in dict_ess.items():
       out_f.write('{}: {}\n\n'.format(k, v))
     out_f.write('\n\n')
@@ -616,11 +616,11 @@ def save_ess(file_path_base,
     dict_res = dict([(param_names[i], samples[i][:, :num_chains_to_save])
                      for i in range(len(param_names))])
     np_path = file_path_base + '{}.npz'.format(i)
-    with tf.gfile.GFile(np_path, 'wb') as out_f:
+    with tf.io.gfile.GFile(np_path, 'wb') as out_f:
       io_buffer = io.BytesIO()
       np.savez(io_buffer, **dict_res)
       out_f.write(io_buffer.getvalue())
 
 
 if __name__ == '__main__':
-  tf.app.run()
+  tf.compat.v1.app.run()

@@ -18,7 +18,7 @@ from tensorflow.python.ops.parallel_for import pfor
 
 from tensorflow.python.framework import smart_cond
 
-FLAGS = tf.app.flags.FLAGS
+FLAGS = tf.compat.v1.app.flags.FLAGS
 
 
 def find_best_learning_rate(elbo,
@@ -40,19 +40,19 @@ def find_best_learning_rate(elbo,
   step_size_approx = util.get_approximate_step_size(
       variational_parameters, num_leapfrog_steps=1)  #FLAGS.num_leapfrog_steps)
 
-  learning_rate_ph = tf.placeholder(shape=[], dtype=tf.float32)
+  learning_rate_ph = tf.compat.v1.placeholder(shape=[], dtype=tf.float32)
   learning_rate = tf.Variable(learning_rate_ph, trainable=False)
-  optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
+  optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
 
   # If specified, incorporate a prior on the learnable parameters.
   prior_logp = tf.constant(0., dtype=elbo.dtype)
   if learnable_parameters_prior is not None:
-    prior_logp = sum([tf.reduce_sum(learnable_parameters_prior.log_prob(param))
+    prior_logp = sum([tf.reduce_sum(input_tensor=learnable_parameters_prior.log_prob(param))
                       for param in learnable_parameters.values()])
   elbo_with_prior = elbo + prior_logp
 
   train = optimizer.minimize(-elbo_with_prior)
-  init = tf.global_variables_initializer()
+  init = tf.compat.v1.global_variables_initializer()
 
   def get_learning_rate(step, base_learning_rate):
     if step > 2* FLAGS.num_optimization_steps / 3:
@@ -63,7 +63,7 @@ def find_best_learning_rate(elbo,
       return base_learning_rate
 
   for learning_rate_val in FLAGS.learning_rates:
-    with tf.Session() as sess:
+    with tf.compat.v1.Session() as sess:
 
       feed_dict = {learning_rate_ph: learning_rate_val}
       sess.run(init, feed_dict=feed_dict)
@@ -138,7 +138,7 @@ def vectorize_log_joint_fn(log_joint_fn):
 
     num_inputs = x1.shape[0]
     if not x1.shape.is_fully_defined():
-      num_inputs = tf.shape(x1)[0]
+      num_inputs = tf.shape(input=x1)[0]
 
     def loop_body(i):
       sliced_args = [tf.gather(v, i) for v in args]

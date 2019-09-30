@@ -88,7 +88,7 @@ def _run_hmc(target, param_shapes, transform=noop, step_size_init=0.1,
   g = tf.Graph()
   with g.as_default():
 
-    step_size = [tf.get_variable(
+    step_size = [tf.compat.v1.get_variable(
         name='step_size'+str(i),
         initializer=np.array(step_size_init[i], dtype=np.float32),
         use_resource=True,  # For TFE compatibility.
@@ -113,8 +113,8 @@ def _run_hmc(target, param_shapes, transform=noop, step_size_init=0.1,
     tr_states = transform_mcmc_states(states, transform)
     ess_op = tfp.mcmc.effective_sample_size(tr_states)
 
-    init = tf.global_variables_initializer()
-    with tf.Session() as sess:
+    init = tf.compat.v1.global_variables_initializer()
+    with tf.compat.v1.Session() as sess:
       init.run()
       start_time = time.time()
       (orig_samples, samples,
@@ -182,9 +182,9 @@ def _run_hmc_interleaved(target_cp, target_ncp, param_shapes,
 
     ess_op = tfp.mcmc.effective_sample_size(states)
 
-    init = tf.global_variables_initializer()
+    init = tf.compat.v1.global_variables_initializer()
 
-    with tf.Session() as sess:
+    with tf.compat.v1.Session() as sess:
       init.run()
       start_time = time.time()
       samples, is_accepted, ess = sess.run(
@@ -215,7 +215,7 @@ def run_centered_hmc(model_config,
                      num_optimization_steps=2000):
   """Runs HMC on the provided (centred) model."""
 
-  tf.reset_default_graph()
+  tf.compat.v1.reset_default_graph()
 
   log_joint_centered = ed.make_log_joint_fn(model_config.model)
 
@@ -269,7 +269,7 @@ def run_noncentered_hmc(model_config,
   one, and runs HMC on the reparametrised model.
   """
 
-  tf.reset_default_graph()
+  tf.compat.v1.reset_default_graph()
 
   return run_parametrised_hmc(
       model_config=model_config,
@@ -347,7 +347,7 @@ def run_interleaved_hmc(model_config,
   non-centred one, and uses both models to run interleaved HMC.
   """
 
-  tf.reset_default_graph()
+  tf.compat.v1.reset_default_graph()
 
   log_joint_centered = ed.make_log_joint_fn(model_config.model)
 
@@ -424,7 +424,7 @@ def run_vip_hmc_continuous(model_config,
                            description='',
                            experiments_dir=''):
 
-  tf.reset_default_graph()
+  tf.compat.v1.reset_default_graph()
 
   if use_iaf_posterior:
     # IAF posterior doesn't give us stddevs for step sizes for HMC (we could
@@ -432,8 +432,8 @@ def run_vip_hmc_continuous(model_config,
     # care about it for ELBOs anyway.
     do_sample = False
 
-  init_val_loc = tf.placeholder('float', shape=())
-  init_val_scale = tf.placeholder('float', shape=())
+  init_val_loc = tf.compat.v1.placeholder('float', shape=())
+  init_val_scale = tf.compat.v1.placeholder('float', shape=())
 
   (learnable_parameters,
    learnable_parametrisation, _) = ed_transforms.make_learnable_parametrisation(
@@ -491,24 +491,24 @@ def run_vip_hmc_continuous(model_config,
   model_dir = os.path.join(experiments_dir,
                            str(description + '_' + model_config.model.__name__))
 
-  if not tf.gfile.Exists(model_dir):
-    tf.gfile.MakeDirs(model_dir)
+  if not tf.io.gfile.exists(model_dir):
+    tf.io.gfile.makedirs(model_dir)
 
-  saver = tf.train.Saver()
+  saver = tf.compat.v1.train.Saver()
   dir_save = os.path.join(model_dir, 'saved_params_{}'.format(gen_id()))
 
-  if not tf.gfile.Exists(dir_save):
-    tf.gfile.MakeDirs(dir_save)
+  if not tf.io.gfile.exists(dir_save):
+    tf.io.gfile.makedirs(dir_save)
 
   best_lr = None
   best_init_loc = None
   best_init_scale = None
 
-  learning_rate_ph = tf.placeholder(shape=[], dtype=tf.float32)
+  learning_rate_ph = tf.compat.v1.placeholder(shape=[], dtype=tf.float32)
   learning_rate = tf.Variable(learning_rate_ph, trainable=False)
-  optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
+  optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
   train = optimizer.minimize(-elbo)
-  init = tf.global_variables_initializer()
+  init = tf.compat.v1.global_variables_initializer()
 
   learning_rates = [0.003, 0.01, 0.01, 0.1, 0.003, 0.01]
   if use_iaf_posterior:
@@ -521,7 +521,7 @@ def run_vip_hmc_continuous(model_config,
 
         timeline = []
 
-        with tf.Session() as sess:
+        with tf.compat.v1.Session() as sess:
 
           init.run(feed_dict={init_val_loc: init_loc,
                               init_val_scale: init_scale,
@@ -572,7 +572,7 @@ def run_vip_hmc_continuous(model_config,
   results = collections.OrderedDict()
   results['elbo'] = best_elbo
 
-  with tf.Session() as sess:
+  with tf.compat.v1.Session() as sess:
 
     saver.restore(sess, dir_save)
     results['vp'] = learned_variational_params
@@ -581,7 +581,7 @@ def run_vip_hmc_continuous(model_config,
 
       vip_step_size_init = sess.run(vip_step_size_approx)
 
-      vip_step_size = [tf.get_variable(
+      vip_step_size = [tf.compat.v1.get_variable(
           name='step_size_vip'+str(i),
           initializer=np.array(vip_step_size_init[i], dtype=np.float32),
           use_resource=True,  # For TFE compatibility.
@@ -605,7 +605,7 @@ def run_vip_hmc_continuous(model_config,
 
       states_vip = transform_mcmc_states(states, to_centered)
 
-      init_again = tf.global_variables_initializer()
+      init_again = tf.compat.v1.global_variables_initializer()
       init_again.run(feed_dict={
           init_val_loc: best_init_loc, init_val_scale: best_init_scale,
           learning_rate_ph: 1.0})  # learning rate doesn't matter for HMC.
@@ -667,7 +667,7 @@ def run_vip_hmc_discrete(model_config,
                          num_adaptation_steps=500,
                          num_optimization_steps=2000):
 
-  tf.reset_default_graph()
+  tf.compat.v1.reset_default_graph()
 
   (_,
    insightful_parametrisation,

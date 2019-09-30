@@ -114,7 +114,7 @@ class Interleaved(TransitionKernel):
 
   def one_step(self, current_state, previous_kernel_results):
 
-    with tf.name_scope(
+    with tf.compat.v1.name_scope(
         name=make_name(self.name, 'iterleaved', 'one_step'),
         values=[current_state, previous_kernel_results]):
 
@@ -156,7 +156,7 @@ class Interleaved(TransitionKernel):
 
   def bootstrap_results(self, init_state, ncp_results=None, cp_results=None):
     """Returns an object with the same type as returned by `one_step`."""
-    with tf.name_scope(
+    with tf.compat.v1.name_scope(
         name=make_name(self.name, 'interleaved', 'bootstrap_results'),
         values=[init_state]):
 

@@ -1,2 +1,4 @@
 *.pkl
 .idea/
+script.py
+__pycache__/

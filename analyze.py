@@ -37,7 +37,7 @@ def get_ess(model_name):
     try:
       file_path = os.path.join(FLAGS.results_dir, model_name, m + ".json")
 
-      with tf.gfile.Open(file_path, "r") as f:
+      with tf.io.gfile.GFile(file_path, "r") as f:
         results = json.load(f)
         ess[m] = results["ess_min"]
         sem[m] = results["sem_min"]
@@ -61,7 +61,7 @@ def get_elbos(model_name):
   for m in methods:
     file_path = os.path.join(FLAGS.results_dir, model_name, m + ".json")
 
-    with tf.gfile.Open(file_path, "r") as f:
+    with tf.io.gfile.GFile(file_path, "r") as f:
       results = json.load(f)
       elbos[m] = results["elbo"]
       stds[m] = results["estimated_elbo_std"]
@@ -77,7 +77,7 @@ def get_reparam(model_name):
   for m in cvip_methods:
     file_path = os.path.join(FLAGS.results_dir, model_name, m + ".json")
 
-    with tf.gfile.Open(file_path, "r") as f:
+    with tf.io.gfile.GFile(file_path, "r") as f:
       results = json.load(f)
       reparam = results["learned_reparam"]
 
@@ -184,4 +184,4 @@ def main(_):
 
 
 if __name__ == "__main__":
-  tf.app.run()
+  tf.compat.v1.app.run()

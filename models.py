@@ -27,6 +27,7 @@ import os
 import numpy as np
 import pandas as pd
 from six.moves import urllib
+import csv
 
 import tensorflow as tf
 
@@ -166,25 +167,31 @@ def get_multivariate_simple():
 
 
 def get_gp_classification():
-  num_train_points = 3
-  num_dims = 2
+  X_train = np.array([[0.184, 0.399], [0.195, 0.422], [0.167, 0.410], [0.182, 0.408],
+                      [0.207, 0.406], [0.213, 0.380], [0.240, 0.395], [0.231, 0.377],
+                      [0.250, 0.374], [0.234, 0.391], [0.286, 0.369], [0.258, 0.351],
+                      [0.195, 0.422], [0.166, 0.410], [0.286, 0.368], [0.257, 0.352],
+                      [0.286, 0.361], [0.257, 0.351],
+                      [0.183, 0.389], [0.184, 0.422], [0.167, 0.410], [0.182, 0.418],
+                      [0.217, 0.406], [0.213, 0.381], [0.250, 0.395], [0.221, 0.367],
+                      [0.250, 0.374], [0.234, 0.391], [0.286, 0.369], [0.258, 0.351],
+                      [0.282, 0.339], [0.293, 0.337], [0.291, 0.292], [0.328, 0.266],
+                      [0.323, 0.208], [0.368, 0.221], [0.398,  0.99], [0.659, 0.142],
+                      [0.689, 0.442], [0.300, 0.356], [0.164, 0.432], [0.199, 0.382],
+                      [0.175, 0.423], [0.212, 0.393], [0.262, 0.363], [0.161, 0.423]
+                      ]).astype(np.float32)
 
-  X_train = np.random.rand(num_train_points, num_dims).astype(np.float32)
-  y_lbls = (np.random.uniform(0, 1, num_train_points) > 0.7).astype(np.int32)
+  num_train_points, num_dims = X_train.shape
+
+  # y_lbls = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).astype(np.int32)
+  y_lbls = [X_train[i, 0] > 0.3 for i in range(num_train_points)]
+  y_lbls[5] = True
 
   def gp_classification_model(index_points):
-    # Define an exponentiated-quadratic kernel with priors on kernel hyperparams.
-    # We parameterize in logspace so all variables are unconstrained.
-    kernel_log_lengthscale = ed.Normal(loc=0., scale=1., name='kernel_log_lengthscale')
-    kernel_log_amplitude = ed.Normal(loc=0., scale=1., name='kernel_log_amplitude')
     kernel = psd_kernels.ExponentiatedQuadratic(
-      amplitude=tf.exp(kernel_log_amplitude),
-      length_scale=tf.exp(kernel_log_lengthscale))
-
-    # Also set a prior on the observation noise scale.
-    observation_noise_log_scale = ed.Normal(loc=-2., scale=1.,
-                                            name='observation_noise_log_scale')
-    observation_noise_variance = tf.exp(2 * observation_noise_log_scale)
+      amplitude=1.,
+      length_scale=1.)
+    observation_noise_variance = 1.
 
     # Define a GP->Bernoulli model over the given index points.
     latent_logits = ed.GaussianProcess(
@@ -199,8 +206,7 @@ def get_gp_classification():
   model_args = [X_train]
   observed = {'y_labels': y_lbls}
 
-  varnames = ['kernel_log_lengthscale', 'kernel_log_amplitude',
-              'observation_noise_log_scale', 'latent_logits']
+  varnames = ['latent_logits']
   param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
   noncentered_parameterization = {p: 0. for p in param_names}
 
@@ -211,6 +217,63 @@ def get_gp_classification():
     gp_classification_model, model_args=model_args, observed_data=observed)
 
   return ModelConfig(gp_classification_model, model_args, observed, to_centered,
+                     to_noncentered, make_to_centered)
+
+
+def get_gp_poisson():
+
+  with open('rongelap.csv', mode='r') as infile:
+    reader = csv.reader(infile)
+    for first_row in reader:
+      keys = first_row[1:5]
+      dict = {k: [] for k in keys}
+      break
+
+    for row in reader:
+      vals = row[1:5]
+      for i in range(len(keys)):
+        dict[keys[i]].append(vals[i])
+
+  X_train = np.column_stack((dict['X1'], dict['X2'])).astype(np.float32)
+  y_data = np.array(dict['data']).astype(np.int32)
+
+  def gp_poisson_model(index_points):
+
+    # kernel_log_lengthscale = ed.Normal(loc=0., scale=1., name='kernel_log_lengthscale')
+    # kernel_log_amplitude = ed.Normal(loc=0., scale=1., name='kernel_log_amplitude')
+
+    kernel = psd_kernels.ExponentiatedQuadratic(
+      amplitude=1., #tf.exp(kernel_log_amplitude),
+      length_scale=1.) #tf.exp(kernel_log_lengthscale))
+
+    observation_noise_variance = 1.
+
+    # Define a GP->Bernoulli model over the given index points.
+    log_rate = ed.GaussianProcess(
+      kernel=kernel,
+      index_points=index_points,
+      observation_noise_variance=observation_noise_variance,
+      name='log_rate')
+
+    y = ed.Poisson(rate=tf.exp(log_rate), name='y')
+    return y
+
+  model_args = [X_train]
+  observed = {'y': y_data}
+
+  varnames = [# 'kernel_log_amplitude',
+              # 'kernel_log_lengthscale',
+              'log_rate']
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
+  noncentered_parameterization = {p: 0. for p in param_names}
+
+  make_to_centered = build_make_to_centered(
+    gp_poisson_model, model_args=model_args, observed_data=observed)
+  to_centered = make_to_centered(**noncentered_parameterization)
+  to_noncentered = make_to_noncentered(
+    gp_poisson_model, model_args=model_args, observed_data=observed)
+
+  return ModelConfig(gp_poisson_model, model_args, observed, to_centered,
                      to_noncentered, make_to_centered)
 
 
@@ -245,8 +308,8 @@ def open_from_url(url):
   path = os.path.expanduser(data_dir)
   filepath = os.path.join(path, filename)
   if not os.path.exists(filepath):
-    if not tf.gfile.Exists(path):
-      tf.gfile.MakeDirs(path)
+    if not tf.io.gfile.exists(path):
+      tf.io.gfile.makedirs(path)
     print('Downloading %s to %s' % (url, filepath))
     urllib.request.urlretrieve(url, filepath)
   with open(filepath, 'r') as f:

@@ -41,7 +41,7 @@ from tensorflow.python.ops.parallel_for import pfor
 
 import program_transformations
 
-FLAGS = tf.app.flags.FLAGS
+FLAGS = tf.compat.v1.app.flags.FLAGS
 
 # pylint: disable=g-import-not-at-top
 try:
@@ -116,16 +116,16 @@ def mean_field_variational_inference(model, *args, **kwargs):
 
   best_elbo = None
 
-  learning_rate_ph = tf.placeholder(shape=[], dtype=tf.float32)
+  learning_rate_ph = tf.compat.v1.placeholder(shape=[], dtype=tf.float32)
   learning_rate = tf.Variable(learning_rate_ph, trainable=False)
-  optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
+  optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
   train = optimizer.minimize(-elbo)
-  init = tf.global_variables_initializer()
+  init = tf.compat.v1.global_variables_initializer()
 
   start_time = time.time()
   for learning_rate_val in [0.01, 0.1, 0.01, 0.1, 0.01, 0.1]:
     feed_dict = {learning_rate_ph: learning_rate_val}
-    with tf.Session() as sess:
+    with tf.compat.v1.Session() as sess:
       sess.run(init, feed_dict=feed_dict)
 
       this_timeline = []
@@ -212,7 +212,7 @@ def get_iaf_elbo(target, num_mc_samples, param_shapes):
       name='q_iaf')
 
   variational_samples = variational_dist.sample(num_mc_samples)
-  target_q_sum = tf.reduce_sum(variational_dist.log_prob(variational_samples))
+  target_q_sum = tf.reduce_sum(input_tensor=variational_dist.log_prob(variational_samples))
   target_sum = 0.
   for s in range(num_mc_samples):
     params = unmarshal(variational_samples[s, Ellipsis])
@@ -222,9 +222,9 @@ def get_iaf_elbo(target, num_mc_samples, param_shapes):
   entropy = -target_q_sum / float(num_mc_samples)
   elbo = energy + entropy
 
-  tf.summary.scalar('energy', energy)
-  tf.summary.scalar('entropy', entropy)
-  tf.summary.scalar('elbo', elbo)
+  tf.compat.v1.summary.scalar('energy', energy)
+  tf.compat.v1.summary.scalar('entropy', entropy)
+  tf.compat.v1.summary.scalar('elbo', elbo)
 
   return elbo
 
@@ -260,8 +260,8 @@ def get_mean_field_elbo(model, target, num_mc_samples, model_args,
       entropy = tf.negative(target_q(**variational_tape))
       return energy + entropy
 
-  elbo = tf.reduce_sum(pfor(loop_body, num_mc_samples)) / num_mc_samples
-  tf.summary.scalar('elbo', elbo)
+  elbo = tf.reduce_sum(input_tensor=pfor(loop_body, num_mc_samples)) / num_mc_samples
+  tf.compat.v1.summary.scalar('elbo', elbo)
   return elbo, variational_parameters
 
 
@@ -276,7 +276,7 @@ def get_approximate_step_size(variational_parameters, num_leapfrog_steps):
 # FIXME: need to make this nicer than with all these weird kwargs
 def approximate_mcmc_step_size(model, *args, **kwargs):
 
-  with tf.variable_scope('approx_step_size_{}'.format(model.__name__)):
+  with tf.compat.v1.variable_scope('approx_step_size_{}'.format(model.__name__)):
     if 'diagnostics' in kwargs.keys():
       diagnostics = kwargs.pop('diagnostics')
     else:
@@ -344,10 +344,10 @@ def make_variational_model_special(model, *args, **kwargs):
               variational_parameters[scale_name])
     else:
       # shape must not be None
-      pre_loc = tf.get_variable(
+      pre_loc = tf.compat.v1.get_variable(
           name=loc_name, initializer=1e-10 * tf.ones(shape, dtype=tf.float32))
       pre_scale = tf.nn.softplus(
-          tf.get_variable(
+          tf.compat.v1.get_variable(
               name=scale_name,
               initializer=-4 * tf.ones(shape, dtype=tf.float32)))
       variational_parameters[loc_name] = (a + 0.1) * pre_loc

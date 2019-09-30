@@ -8,7 +8,7 @@ from tensorflow_probability import edward2 as ed
 import util
 import program_transformations as ed_transforms
 
-FLAGS = tf.app.flags.FLAGS
+FLAGS = tf.compat.v1.app.flags.FLAGS
 
 
 def make_cp_graph(model_config):
@@ -17,7 +17,7 @@ def make_cp_graph(model_config):
                 Resets the default TF graph.
         """
 
-  tf.reset_default_graph()
+  tf.compat.v1.reset_default_graph()
 
   log_joint_centered = ed.make_log_joint_fn(model_config.model)
 
@@ -57,7 +57,7 @@ def make_ncp_graph(model_config):
                 Constructs the CP graph of the given model.
                 Resets the default TF graph.
         """
-  tf.reset_default_graph()
+  tf.compat.v1.reset_default_graph()
 
   interceptor = ed_transforms.ncp
 
@@ -106,7 +106,7 @@ def make_cvip_graph(model_config,
                 Resets the default TF graph.
         """
 
-  tf.reset_default_graph()
+  tf.compat.v1.reset_default_graph()
 
   results = collections.OrderedDict()
 
@@ -165,7 +165,7 @@ def make_dvip_graph(model_config, reparam, parameterisation_type='exp'):
                 Resets the default TF graph.
         """
 
-  tf.reset_default_graph()
+  tf.compat.v1.reset_default_graph()
 
   results = collections.OrderedDict()
 
