@@ -257,7 +257,7 @@ def main(_):
   elif FLAGS.model == 'multivariate_simple':
     model_config = models.get_multivariate_simple()
   elif FLAGS.model == 'gp_classification':
-    model_config = models.get_gp_classification()
+    model_config = models.get_gp_classification(FLAGS.dataset)
   elif FLAGS.model == 'gp_poisson':
     model_config = models.get_gp_poisson()
   else:
