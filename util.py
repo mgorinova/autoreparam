@@ -26,22 +26,23 @@ import time
 
 from absl import logging
 
+
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 from tensorflow_probability import bijectors as tfb
 from tensorflow_probability import distributions as tfd
 from tensorflow_probability import edward2 as ed
 
-from tensorflow_probability.python.edward2.generated_random_variables import Normal
-from tensorflow_probability.python.edward2.interceptor import tape
-from tensorflow_probability.python.edward2.program_transformations import make_log_joint_fn
+from tensorflow_probability.python.experimental.edward2.generated_random_variables import Normal
+from tensorflow_probability.python.experimental.edward2.interceptor import tape
+from tensorflow_probability.python.experimental.edward2.program_transformations import make_log_joint_fn
 
 from tensorflow.python.ops.parallel_for import pfor
 
-import program_transformations
+import program_transformations as program_transformations
 
-FLAGS = tf.compat.v1.app.flags.FLAGS
+FLAGS = tf.app.flags.FLAGS
 
 # pylint: disable=g-import-not-at-top
 try:
@@ -113,7 +114,6 @@ def mean_field_variational_inference(model, *args, **kwargs):
     elbo_sum = elbo_sum + target(**params) - target_q(**params)
 
   elbo = elbo_sum / 16.
-
   best_elbo = None
 
   learning_rate_ph = tf.compat.v1.placeholder(shape=[], dtype=tf.float32)
@@ -260,7 +260,10 @@ def get_mean_field_elbo(model, target, num_mc_samples, model_args,
       entropy = tf.negative(target_q(**variational_tape))
       return energy + entropy
 
-  elbo = tf.reduce_sum(input_tensor=pfor(loop_body, num_mc_samples)) / num_mc_samples
+  if num_mc_samples == 1:
+    elbo = tf.reduce_sum(loop_body(0))
+  else:
+    elbo = tf.reduce_sum(input_tensor=pfor(loop_body, num_mc_samples)) / num_mc_samples
   tf.compat.v1.summary.scalar('elbo', elbo)
   return elbo, variational_parameters
 
@@ -333,7 +336,8 @@ def make_variational_model_special(model, *args, **kwargs):
   variational_parameters = collections.OrderedDict()
   param_params = kwargs['parameterisation']
 
-  def get_or_init(name, a, b, shape=None):
+  def get_or_init(name, a, b, L=None, std_mean=None,
+                  prior_mean=None, prior_scale=None, shape=None):
 
     loc_name = name + '_loc'
     scale_name = name + '_scale'
@@ -345,11 +349,11 @@ def make_variational_model_special(model, *args, **kwargs):
     else:
       # shape must not be None
       pre_loc = tf.compat.v1.get_variable(
-          name=loc_name, initializer=1e-10 * tf.ones(shape, dtype=tf.float32))
+          name=loc_name, initializer=1e-2 * tf.random.normal(shape, dtype=tf.float32))
       pre_scale = tf.nn.softplus(
           tf.compat.v1.get_variable(
               name=scale_name,
-              initializer=-4 * tf.ones(shape, dtype=tf.float32)))
+              initializer=-2 * tf.ones(shape, dtype=tf.float32)))
       variational_parameters[loc_name] = (a + 0.1) * pre_loc
       variational_parameters[scale_name] = pre_scale**(b + 0.1)
 
@@ -363,7 +367,7 @@ def make_variational_model_special(model, *args, **kwargs):
       rv = rv_constructor(*rv_args, **rv_kwargs)
 
       try:
-        a, b = param_params[name[:-5] + 'a'], param_params[name[:-5] + 'b']
+        a, b = param_params[name + '_a'], param_params[name + '_b']
       except Exception as err:
         print('couldn\'t get centering params for variable {}: {}'.format(
             name, err))

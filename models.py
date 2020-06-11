@@ -23,39 +23,43 @@ from __future__ import print_function
 
 import collections
 import contextlib
+import csv
 import os
+
 import numpy as np
 import pandas as pd
-from six.moves import urllib
-import csv
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 from tensorflow_probability import bijectors as tfb
 from tensorflow_probability import distributions as tfd
 
 from tensorflow_probability import edward2 as ed
+from tensorflow_probability.python.math import psd_kernels
+
 import program_transformations as ed_transforms
-from tensorflow_probability import positive_semidefinite_kernels as psd_kernels
 
-from sklearn import datasets
+import data.electric as electric
+import data.election88 as election88
+import data.police as police
 
-import electric
-import election88
+DATA_DIR = './data/'
 
-data_dir = '/tmp/datasets'
+flags = tf.app.flags
+FLAGS = flags.FLAGS
 
 ModelConfig = collections.namedtuple(
     'ModelConfig', ('model', 'model_args', 'observed_data', 'to_centered',
-                    'to_noncentered', 'make_to_centered'))
-
+                    'to_noncentered', 'make_to_centered',
+                    'make_to_partially_noncentered', 'bijectors_fn'))
 
 def build_make_to_centered(model, model_args, observed_data={}):
   """Make a fn to convert a model's state to centered parameterisation."""
 
   def make_to_centered(**centering_kwargs):
     (_, parametrisation, _) = ed_transforms.make_learnable_parametrisation(
-        learnable_parameters=centering_kwargs)
+        learnable_parameters=centering_kwargs,
+        parameterisation_type=FLAGS.learnable_parameterisation_type)
 
     def to_centered(uncentered_state):
       set_values = ed_transforms.make_value_setter(*uncentered_state)
@@ -98,6 +102,32 @@ def make_to_noncentered(model, model_args, observed_data={}):
   return to_noncentered
 
 
+def build_make_to_partially_noncentered(model, model_args, observed_data={}):
+  """Make a fn to convert a model's state to noncentered parameterisation."""
+
+  def make_to_partially_noncentered(**centering_kwargs):
+    (_, parametrisation, _) = ed_transforms.make_learnable_parametrisation(
+        learnable_parameters=centering_kwargs)
+
+    def to_partially_noncentered(centered_state):
+      set_values = ed_transforms.make_value_setter(*centered_state)
+      with ed.tape() as noncentered_tape:
+        with ed.interception(parametrisation):
+          with ed.interception(set_values):
+            model(*model_args)
+
+      param_vals = [
+          tf.identity(v)
+          for k, v in noncentered_tape.items()
+          if k not in observed_data.keys()
+      ]
+      return param_vals
+
+    return to_partially_noncentered
+
+  return make_to_partially_noncentered
+
+
 def get_eight_schools():
   """Eight schools model."""
   num_schools = 8
@@ -120,17 +150,20 @@ def get_eight_schools():
   observed = {'y': treatment_effects}
 
   varnames = ['mu', 'log_tau', 'theta']
-  param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b', v + '_c')]
   noncentered_parameterization = {p: 0. for p in param_names}
 
   make_to_centered = build_make_to_centered(
+      schools_model, model_args=model_args, observed_data=observed)
+  make_to_partially_noncentered = build_make_to_partially_noncentered(
       schools_model, model_args=model_args, observed_data=observed)
   to_centered = make_to_centered(**noncentered_parameterization)
   to_noncentered = make_to_noncentered(
       schools_model, model_args=model_args, observed_data=observed)
 
   return ModelConfig(schools_model, model_args, observed, to_centered,
-                     to_noncentered, make_to_centered)
+                     to_noncentered, make_to_centered,
+                     make_to_partially_noncentered, None)
 
 
 def get_multivariate_simple():
@@ -155,82 +188,427 @@ def get_multivariate_simple():
   observed = {'y': data}
 
   varnames = ['V', 'x']
-  param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b', v + '_c')]
   noncentered_parameterization = {p: 0. for p in param_names}
 
   make_to_centered = build_make_to_centered(
+    multivariate_normal_model, model_args=model_args, observed_data=observed)
+  make_to_partially_noncentered = build_make_to_partially_noncentered(
     multivariate_normal_model, model_args=model_args, observed_data=observed)
   to_centered = make_to_centered(**noncentered_parameterization)
   to_noncentered = make_to_noncentered(
     multivariate_normal_model, model_args=model_args, observed_data=observed)
 
-  return ModelConfig(multivariate_normal_model, model_args, observed, to_centered,
-                     to_noncentered, make_to_centered)
+  return ModelConfig(multivariate_normal_model, model_args, observed,
+                     to_centered, to_noncentered, make_to_centered,
+                     make_to_partially_noncentered, None)
 
 
-def get_gp_classification(dataset = 'toy'):
+def get_gp_rhizoc():
+  with open_data_file('Rhizoc.csv') as f:
+    reader = csv.reader(f)
+    for first_row in reader:
+      keys = first_row[1:6]
+      d = {k: [] for k in keys}
+      break
 
-  if dataset == "iris":
-    iris = datasets.load_iris()
-    X_train = np.array(iris.data[50:, :], dtype=np.float32)
-    y_lbls = np.array(iris.target[50:]) - 1
+    for row in reader:
+      vals = row[1:6]
+      for i in range(len(keys)):
+        d[keys[i]].append(vals[i])
 
-  else:
-    X_train = np.array([[0.284, 0.399], [0.295, 0.422], [0.297, 0.410], [0.282, 0.408],
-                        [0.299, 0.406], [0.287, 0.380], [0.290, 0.395], [0.281, 0.377],
-                        [0.280, 0.374], [0.289, 0.391], [0.286, 0.369], [0.298, 0.351],
-                        [0.295, 0.422], [0.296, 0.410], [0.286, 0.368], [0.287, 0.352],
-                        [0.280, 0.374], [0.289, 0.391], [0.286, 0.369], [0.298, 0.351],
-                        [0.295, 0.422], [0.288, 0.410], [0.286, 0.368], [0.287, 0.352],
-                        [0.286, 0.361], [0.287, 0.351], [0.290, 0.390], [0.298, 0.389],
-                        [0.283, 0.389], [0.284, 0.422], [0.297, 0.410], [0.282, 0.418],
-                        [0.297, 0.406], [0.283, 0.381], [0.280, 0.395], [0.281, 0.367],
-                        [0.290, 0.374], [0.284, 0.391], [0.286, 0.369], [0.288, 0.351],
-                        [0.282, 0.339], [0.293, 0.337], [0.291, 0.392], [0.329, 0.286],
-                        [0.323, 0.208], [0.368, -0.221], [0.398, 0.99], [0.659, 0.142],
-                        [0.689, 0.442], [0.320, 0.356], [0.294, 0.432], [0.299, 0.382],
-                        [0.287, 0.423], [0.289, 0.393], [0.292, 0.363], [0.291, 0.423]
-                        ]).astype(np.float32)
+  X_train = np.column_stack((d['X'], d['Y'])).astype(np.float32)
+  total_crown = np.array(d['TotalCrown']).astype(np.float32)
+  total_crown_rhiz = np.array(d['TotalCrownRhiz']).astype(np.float32)
 
-    num_train_points, num_dims = X_train.shape
-    y_lbls = np.array([X_train[i, 0] > 0.3 for i in range(num_train_points)])
+  def rhizoc_model(index_points):
+    kernel_log_amplitude = ed.Normal(loc=0., scale=1., name='kernel_log_amplitude')
 
-  def gp_classification_model(index_points):
-    kernel = psd_kernels.ExponentiatedQuadratic(
-      amplitude=1.,
-      length_scale=1.)
-    observation_noise_variance = 1.
+    kernel_log_lengthscale = ed.Normal(
+        loc=0., scale=1., name='kernel_log_lengthscale')
+    kernel = psd_kernels.MaternOneHalf(
+      amplitude=tf.exp(kernel_log_amplitude),
+      length_scale=tf.exp(kernel_log_lengthscale))
+
+    observation_noise_log_variance = ed.Normal(
+        loc=kernel_log_amplitude - 1,
+        scale=1., name='observation_noise_log_variance')
+    mean_log_rate = ed.Normal(
+        loc=0., scale=1., name='mean_log_rate')
 
     # Define a GP->Bernoulli model over the given index points.
-    latent_logits = ed.GaussianProcess(
-      kernel=kernel,
-      index_points=index_points,
-      observation_noise_variance=observation_noise_variance,
-      name='latent_logits')
+    log_rate = ed.GaussianProcess(
+        mean_fn = lambda _ : mean_log_rate,
+        kernel=kernel,
+        index_points=index_points,
+        observation_noise_variance=1e-4 + tf.exp(
+            observation_noise_log_variance),
+        name='log_rate')
 
-    y_labels = ed.Bernoulli(logits=latent_logits, name='y_labels')
-    return y_labels
+    y = ed.Binomial(total_count=total_crown, logits=log_rate, name='y')
+    return y
 
   model_args = [X_train]
-  observed = {'y_labels': y_lbls}
+  observed = {'y': total_crown_rhiz}
 
-  varnames = ['latent_logits']
-  param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
+
+  varnames = ['kernel_log_amplitude',
+              'kernel_log_lengthscale',
+              'observation_noise_log_variance',
+              'mean_log_rate',
+              'log_rate']
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b', v + '_c')]
   noncentered_parameterization = {p: 0. for p in param_names}
 
   make_to_centered = build_make_to_centered(
+    rhizoc_model, model_args=model_args, observed_data=observed)
+  make_to_partially_noncentered = build_make_to_partially_noncentered(
+    rhizoc_model, model_args=model_args, observed_data=observed)
+  to_centered = make_to_centered(**noncentered_parameterization)
+  to_noncentered = make_to_noncentered(
+    rhizoc_model, model_args=model_args, observed_data=observed)
+
+  bijectors_fn = None
+
+  return ModelConfig(rhizoc_model, model_args, observed, to_centered,
+                     to_noncentered, make_to_centered,
+                     make_to_partially_noncentered, bijectors_fn)
+
+
+def get_gp_classification(dataset='iris', validate_args=False):
+
+  if dataset=='iris':
+    X_train = np.array([[7. , 3.2, 4.7, 1.4],
+       [6.4, 3.2, 4.5, 1.5],
+       [6.9, 3.1, 4.9, 1.5],
+       [5.5, 2.3, 4. , 1.3],
+       [6.5, 2.8, 4.6, 1.5],
+       [5.7, 2.8, 4.5, 1.3],
+       [6.3, 3.3, 4.7, 1.6],
+       [4.9, 2.4, 3.3, 1. ],
+       [6.6, 2.9, 4.6, 1.3],
+       [5.2, 2.7, 3.9, 1.4],
+       [5. , 2. , 3.5, 1. ],
+       [5.9, 3. , 4.2, 1.5],
+       [6. , 2.2, 4. , 1. ],
+       [6.1, 2.9, 4.7, 1.4],
+       [5.6, 2.9, 3.6, 1.3],
+       [6.7, 3.1, 4.4, 1.4],
+       [5.6, 3. , 4.5, 1.5],
+       [5.8, 2.7, 4.1, 1. ],
+       [6.2, 2.2, 4.5, 1.5],
+       [5.6, 2.5, 3.9, 1.1],
+       [5.9, 3.2, 4.8, 1.8],
+       [6.1, 2.8, 4. , 1.3],
+       [6.3, 2.5, 4.9, 1.5],
+       [6.1, 2.8, 4.7, 1.2],
+       [6.4, 2.9, 4.3, 1.3],
+       [6.6, 3. , 4.4, 1.4],
+       [6.8, 2.8, 4.8, 1.4],
+       [6.7, 3. , 5. , 1.7],
+       [6. , 2.9, 4.5, 1.5],
+       [5.7, 2.6, 3.5, 1. ],
+       [5.5, 2.4, 3.8, 1.1],
+       [5.5, 2.4, 3.7, 1. ],
+       [5.8, 2.7, 3.9, 1.2],
+       [6. , 2.7, 5.1, 1.6],
+       [5.4, 3. , 4.5, 1.5],
+       [6. , 3.4, 4.5, 1.6],
+       [6.7, 3.1, 4.7, 1.5],
+       [6.3, 2.3, 4.4, 1.3],
+       [5.6, 3. , 4.1, 1.3],
+       [5.5, 2.5, 4. , 1.3],
+       [5.5, 2.6, 4.4, 1.2],
+       [6.1, 3. , 4.6, 1.4],
+       [5.8, 2.6, 4. , 1.2],
+       [5. , 2.3, 3.3, 1. ],
+       [5.6, 2.7, 4.2, 1.3],
+       [5.7, 3. , 4.2, 1.2],
+       [5.7, 2.9, 4.2, 1.3],
+       [6.2, 2.9, 4.3, 1.3],
+       [5.1, 2.5, 3. , 1.1],
+       [5.7, 2.8, 4.1, 1.3],
+       [6.3, 3.3, 6. , 2.5],
+       [5.8, 2.7, 5.1, 1.9],
+       [7.1, 3. , 5.9, 2.1],
+       [6.3, 2.9, 5.6, 1.8],
+       [6.5, 3. , 5.8, 2.2],
+       [7.6, 3. , 6.6, 2.1],
+       [4.9, 2.5, 4.5, 1.7],
+       [7.3, 2.9, 6.3, 1.8],
+       [6.7, 2.5, 5.8, 1.8],
+       [7.2, 3.6, 6.1, 2.5],
+       [6.5, 3.2, 5.1, 2. ],
+       [6.4, 2.7, 5.3, 1.9],
+       [6.8, 3. , 5.5, 2.1],
+       [5.7, 2.5, 5. , 2. ],
+       [5.8, 2.8, 5.1, 2.4],
+       [6.4, 3.2, 5.3, 2.3],
+       [6.5, 3. , 5.5, 1.8],
+       [7.7, 3.8, 6.7, 2.2],
+       [7.7, 2.6, 6.9, 2.3],
+       [6. , 2.2, 5. , 1.5],
+       [6.9, 3.2, 5.7, 2.3],
+       [5.6, 2.8, 4.9, 2. ],
+       [7.7, 2.8, 6.7, 2. ],
+       [6.3, 2.7, 4.9, 1.8],
+       [6.7, 3.3, 5.7, 2.1],
+       [7.2, 3.2, 6. , 1.8],
+       [6.2, 2.8, 4.8, 1.8],
+       [6.1, 3. , 4.9, 1.8],
+       [6.4, 2.8, 5.6, 2.1],
+       [7.2, 3. , 5.8, 1.6],
+       [7.4, 2.8, 6.1, 1.9],
+       [7.9, 3.8, 6.4, 2. ],
+       [6.4, 2.8, 5.6, 2.2],
+       [6.3, 2.8, 5.1, 1.5],
+       [6.1, 2.6, 5.6, 1.4],
+       [7.7, 3. , 6.1, 2.3],
+       [6.3, 3.4, 5.6, 2.4],
+       [6.4, 3.1, 5.5, 1.8],
+       [6. , 3. , 4.8, 1.8],
+       [6.9, 3.1, 5.4, 2.1],
+       [6.7, 3.1, 5.6, 2.4],
+       [6.9, 3.1, 5.1, 2.3],
+       [5.8, 2.7, 5.1, 1.9],
+       [6.8, 3.2, 5.9, 2.3],
+       [6.7, 3.3, 5.7, 2.5],
+       [6.7, 3. , 5.2, 2.3],
+       [6.3, 2.5, 5. , 1.9],
+       [6.5, 3. , 5.2, 2. ],
+       [6.2, 3.4, 5.4, 2.3],
+       [5.9, 3. , 5.1, 1.8]]).astype(np.float32)
+    y_lbls =  np.float32(
+        np.array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+       1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+       1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+       2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+       2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]) - 1)
+    covariates = None
+  elif dataset=='toy':
+    X_train = np.array([[0.284, 0.399], [0.295, 0.422], [0.297, 0.410],
+                      [0.282, 0.408], [0.299, 0.406], [0.287, 0.380],
+                      [0.290, 0.395], [0.281, 0.377], [0.280, 0.374],
+                      [0.289, 0.391], [0.286, 0.369], [0.298, 0.351],
+                      [0.295, 0.422], [0.296, 0.410], [0.286, 0.368],
+                      [0.287, 0.352], [0.280, 0.374], [0.289, 0.391],
+                      [0.286, 0.369], [0.298, 0.351], [0.295, 0.422],
+                      [0.288, 0.410], [0.286, 0.368], [0.287, 0.352],
+                      [0.286, 0.361], [0.287, 0.351], [0.290, 0.390],
+                      [0.298, 0.389], [0.283, 0.389], [0.284, 0.422],
+                      [0.297, 0.410], [0.282, 0.418], [0.297, 0.406],
+                      [0.283, 0.381], [0.280, 0.395], [0.281, 0.367],
+                      [0.290, 0.374], [0.284, 0.391], [0.286, 0.369],
+                      [0.288, 0.351], [0.282, 0.339], [0.293, 0.337],
+                      [0.291, 0.392], [0.329, 0.286], [0.323, 0.208],
+                      [0.368, -0.221], [0.398, 0.99], [0.659, 0.142],
+                      [0.689, 0.442], [0.320, 0.356], [0.294, 0.432],
+                      [0.299, 0.382], [0.287, 0.423], [0.289, 0.393],
+                      [0.292, 0.363], [0.291, 0.423]], dtype=np.float32)
+    num_train_points, num_dims = X_train.shape
+    y_lbls = [X_train[i, 0] > 0.3 for i in range(num_train_points)]
+    covariates = None
+
+  elif dataset=='gambia':
+    with open_data_file('gambia.txt') as f:
+      d = np.float32(np.loadtxt(f, skiprows = 1))
+
+      np.random.seed(42)
+      subset = np.random.permutation(len(d))[::5]
+      d = d[subset]  # Since our implementation inverts the kernel matrix at every
+                     # training step, downsample the data to keep things from
+                     # out of hand.
+
+      locations = d[:, 0:2]
+      mean_location = np.mean(locations, axis=0)
+      std_locations = (locations - mean_location) / np.std(locations, axis=0)
+      has_malaria = d[:, 2]
+      X_train = std_locations
+      y_lbls = has_malaria
+
+      # covariates:
+      # 0: age in days
+      # 1: used malaria net
+      # 2: bed net treated with permethrin?
+      # 3: estimated level of greenspace nearby
+      # 4: whether village is in the PHC system
+      covariates = d[:, 3:]
+      covariates[:, 0] -= np.mean(covariates[:, 0])
+      covariates[:, 0] /= np.std(covariates[:, 0])
+      covariates[:, 3] -= np.mean(covariates[:, 3])
+      covariates[:, 3] /= np.std(covariates[:, 3])
+  else:
+    raise Exception('unrecognized dataset {}!'.format(dataset))
+
+  num_train_points, num_dims = X_train.shape
+
+  def gp_classification_model(index_points):
+
+    kernel_log_amplitude = ed.Normal(loc=0., scale=1.,
+                                     name='kernel_log_amplitude',
+                                     validate_args=validate_args)
+
+    kernel_log_lengthscale = ed.Normal(loc=0., scale=1.,
+                                        name='kernel_log_lengthscale',
+                                        validate_args=validate_args)
+    kernel = psd_kernels.ExponentiatedQuadratic(
+      length_scale=1e-3 + tf.exp(kernel_log_lengthscale),
+      amplitude=1e-3 + tf.exp(kernel_log_amplitude),
+      validate_args=validate_args)
+
+    observation_noise_log_variance = ed.Normal(
+        loc=kernel_log_amplitude - 1., scale=1.,
+        name='observation_noise_log_variance',
+        validate_args=validate_args)
+
+    mean_log_odds = ed.Normal(
+        loc=0., scale=1., name='mean_log_odds',
+        validate_args=validate_args)
+
+    regression_effect = 0.
+    if covariates is not None:
+      weights = ed.Normal(loc=0., scale=tf.ones([5]) * 1e4, name='weights')
+      regression_effect = tf.linalg.matvec(covariates, weights)
+
+    # Define a GP->Bernoulli model over the given index points.
+    latent_log_odds = ed.GaussianProcess(
+      mean_fn=lambda _: mean_log_odds + regression_effect,
+      kernel=kernel,
+      index_points=index_points,
+      observation_noise_variance=1e-3 + tf.exp(
+            observation_noise_log_variance),
+      validate_args=validate_args,
+      name='latent_log_odds')
+
+    y = ed.Bernoulli(logits=latent_log_odds, name='y',
+                     validate_args=validate_args)
+    return y
+
+  model_args = [X_train]
+  observed = {'y': y_lbls}
+
+  varnames = ['kernel_log_amplitude',
+              'kernel_log_lengthscale',
+              'observation_noise_log_variance',
+              'mean_log_odds']
+  if covariates is not None:
+    varnames.append('weights')
+  varnames.append('latent_log_odds')
+
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b', v + '_c')]
+  noncentered_parameterization = {p: 0. for p in param_names}
+
+  make_to_centered = build_make_to_centered(
+    gp_classification_model, model_args=model_args, observed_data=observed)
+  make_to_partially_noncentered = build_make_to_partially_noncentered(
     gp_classification_model, model_args=model_args, observed_data=observed)
   to_centered = make_to_centered(**noncentered_parameterization)
   to_noncentered = make_to_noncentered(
     gp_classification_model, model_args=model_args, observed_data=observed)
 
+  bijectors_fn = None
+
   return ModelConfig(gp_classification_model, model_args, observed, to_centered,
-                     to_noncentered, make_to_centered)
+                     to_noncentered, make_to_centered,
+                     make_to_partially_noncentered, bijectors_fn)
 
 
-def get_gp_poisson():
+def get_gp_poisson(dataset='rongelap'):
 
-  with open('rongelap.csv', mode='r') as infile:
+  if dataset=='rongelap':
+    with open_data_file('rongelap.csv') as infile:
+      reader = csv.reader(infile)
+      for first_row in reader:
+        keys = first_row[1:5]
+        dict = {k: [] for k in keys}
+        break
+
+      for row in reader:
+        vals = row[1:5]
+        for i in range(len(keys)):
+          dict[keys[i]].append(vals[i])
+
+    X_train = np.column_stack((dict['X1'], dict['X2'])).astype(np.float32)
+    observation_times = np.array(dict['units.m']).astype(np.float32)
+    y_data = np.array(dict['data']).astype(np.int32)
+  elif dataset=='weeds':
+    with open_data_file('Weed.csv') as f:
+      reader = csv.reader(f)
+      for first_row in reader:
+        keys = first_row[1:5]
+        d = {k: [] for k in keys}
+        break
+
+      for row in reader:
+        vals = row[1:5]
+        for i in range(len(keys)):
+          d[keys[i]].append(vals[i])
+
+    X_train = np.column_stack(
+        (d['Eastings..meter.'], d['Northings..meter.'])).astype(np.float32)
+    weed_counts = np.array(d['Exact.weed.counts']).astype(np.float32)
+    estimated_weed_counts_from_images = np.array(
+        d['Image.estimates']).astype(np.float32)
+    y_data = estimated_weed_counts_from_images
+    observation_times = 1.  # Weed counts have no concept of duration.
+
+  def gp_poisson_model(index_points):
+    kernel_log_amplitude = ed.Normal(loc=0., scale=1.,
+                                     name='kernel_log_amplitude')
+    kernel_log_lengthscale = ed.Normal(
+        loc=0., scale=1., name='kernel_log_lengthscale')
+
+    kernel = psd_kernels.MaternOneHalf(
+      amplitude=tf.exp(kernel_log_amplitude),
+      length_scale=tf.exp(kernel_log_lengthscale))
+
+    observation_noise_log_variance = ed.Normal(
+        loc=kernel_log_amplitude - 1, scale=1.,
+        name='observation_noise_log_variance')
+
+    mean_log_rate = ed.Normal(
+        loc=0., scale=1., name='mean_log_rate')
+
+    # Define a GP->Bernoulli model over the given index points.
+    log_rate = ed.GaussianProcess(
+        mean_fn = lambda _ : mean_log_rate,
+        kernel=kernel,
+        index_points=index_points,
+        observation_noise_variance=tf.exp(observation_noise_log_variance),
+        name='log_rate')
+
+    y = ed.Poisson(rate=observation_times * tf.exp(log_rate), name='y')
+    return y
+
+  model_args = [X_train]
+  observed = {'y': y_data}
+
+  varnames = ['kernel_log_amplitude',
+              'kernel_log_lengthscale',
+              'observation_noise_log_variance',
+              'mean_log_rate',
+              'log_rate']
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b', v + '_c')]
+  noncentered_parameterization = {p: 0. for p in param_names}
+
+  make_to_centered = build_make_to_centered(
+    gp_poisson_model, model_args=model_args, observed_data=observed)
+  make_to_partially_noncentered = build_make_to_partially_noncentered(
+    gp_poisson_model, model_args=model_args, observed_data=observed)
+  to_centered = make_to_centered(**noncentered_parameterization)
+  to_noncentered = make_to_noncentered(
+    gp_poisson_model, model_args=model_args, observed_data=observed)
+
+  bijectors_fn = None
+
+  return ModelConfig(gp_poisson_model, model_args, observed, to_centered,
+                     to_noncentered, make_to_centered,
+                     make_to_partially_noncentered, bijectors_fn)
+
+
+def get_gp_poisson_fixed():
+
+  with open_data_file('rongelap.csv') as infile:
     reader = csv.reader(infile)
     for first_row in reader:
       keys = first_row[1:5]
@@ -243,46 +621,51 @@ def get_gp_poisson():
         dict[keys[i]].append(vals[i])
 
   X_train = np.column_stack((dict['X1'], dict['X2'])).astype(np.float32)
+  observation_times = np.array(dict['units.m']).astype(np.float32)
   y_data = np.array(dict['data']).astype(np.int32)
 
   def gp_poisson_model(index_points):
 
-    # kernel_log_lengthscale = ed.Normal(loc=0., scale=1., name='kernel_log_lengthscale')
-    # kernel_log_amplitude = ed.Normal(loc=0., scale=1., name='kernel_log_amplitude')
-
     kernel = psd_kernels.ExponentiatedQuadratic(
-      amplitude=1., #tf.exp(kernel_log_amplitude),
-      length_scale=1.) #tf.exp(kernel_log_lengthscale))
+      amplitude=tf.exp(-0.7163072228431702),
+      length_scale=tf.exp(4.592937469482422))
 
-    observation_noise_variance = 1.
+    mean_log_rate = 1.8345298767089844
+    observation_noise_log_variance = -2.6102027893066406
 
     # Define a GP->Bernoulli model over the given index points.
     log_rate = ed.GaussianProcess(
-      kernel=kernel,
-      index_points=index_points,
-      observation_noise_variance=observation_noise_variance,
-      name='log_rate')
+        mean_fn = lambda _ : mean_log_rate,
+        kernel=kernel,
+        index_points=index_points,
+        observation_noise_variance=tf.exp(observation_noise_log_variance),
+        name='log_rate')
 
-    y = ed.Poisson(rate=tf.exp(log_rate), name='y')
+    y = ed.Poisson(rate=observation_times * tf.exp(log_rate), name='y')
     return y
 
   model_args = [X_train]
   observed = {'y': y_data}
 
-  varnames = [# 'kernel_log_amplitude',
-              # 'kernel_log_lengthscale',
+  varnames = ['kernel_log_amplitude',
+              'kernel_log_lengthscale',
+              'mean_log_rate',
+              'observation_noise_log_variance',
               'log_rate']
-  param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b', v + '_c')]
   noncentered_parameterization = {p: 0. for p in param_names}
 
   make_to_centered = build_make_to_centered(
+    gp_poisson_model, model_args=model_args, observed_data=observed)
+  make_to_partially_noncentered = build_make_to_partially_noncentered(
     gp_poisson_model, model_args=model_args, observed_data=observed)
   to_centered = make_to_centered(**noncentered_parameterization)
   to_noncentered = make_to_noncentered(
     gp_poisson_model, model_args=model_args, observed_data=observed)
 
   return ModelConfig(gp_poisson_model, model_args, observed, to_centered,
-                     to_noncentered, make_to_centered)
+                     to_noncentered, make_to_centered,
+                     make_to_partially_noncentered, None)
 
 
 def get_neals_funnel():
@@ -297,30 +680,26 @@ def get_neals_funnel():
   observed = {}
 
   varnames = ['x1', 'x2']
-  param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b', v + '_c')]
   noncentered_parameterization = {p: 0. for p in param_names}
 
   make_to_centered = build_make_to_centered(
+      neals_funnel, model_args=model_args, observed_data=observed)
+  make_to_partially_noncentered = build_make_to_partially_noncentered(
       neals_funnel, model_args=model_args, observed_data=observed)
   to_centered = make_to_centered(**noncentered_parameterization)
   to_noncentered = make_to_noncentered(
       neals_funnel, model_args=model_args, observed_data=observed)
 
   return ModelConfig(neals_funnel, model_args, observed, to_centered,
-                     to_noncentered, make_to_centered)
+                     to_noncentered, make_to_centered,
+                     make_to_partially_noncentered, None)
 
 
 @contextlib.contextmanager
-def open_from_url(url):
-  filename = os.path.basename(url)
-  path = os.path.expanduser(data_dir)
-  filepath = os.path.join(path, filename)
-  if not os.path.exists(filepath):
-    if not tf.io.gfile.exists(path):
-      tf.io.gfile.makedirs(path)
-    print('Downloading %s to %s' % (url, filepath))
-    urllib.request.urlretrieve(url, filepath)
-  with open(filepath, 'r') as f:
+def open_data_file(fname):
+  filename = os.path.basename(fname)
+  with tf.io.gfile.GFile(os.path.join(DATA_DIR, filename), 'r') as f:
     yield f
 
 
@@ -333,15 +712,13 @@ def load_radon_data(state_code):
 
   # Non-NaN possibilities: MN, IN, MO, ND, PA
 
-  with open_from_url(
-    'http://www.stat.columbia.edu/~gelman/arm/examples/radon/srrs2.dat') as f:
+  with open_data_file('srrs2.dat') as f:
     srrs2 = pd.read_csv(f)
   srrs2.columns = srrs2.columns.map(str.strip)
   srrs_mn = srrs2.assign(fips=srrs2.stfips * 1000 +
                          srrs2.cntyfips)[srrs2.state == state_code]
 
-  with open_from_url(
-    'http://www.stat.columbia.edu/~gelman/arm/examples/radon/cty.dat') as f:
+  with open_data_file('cty.dat') as f:
     cty = pd.read_csv(f)
   cty_mn = cty[cty.st == state_code].copy()
   cty_mn['fips'] = 1000 * cty_mn.stfips + cty_mn.ctfips
@@ -414,17 +791,19 @@ def get_radon_model_stddvs(state_code='MN'):
   observed = {'y': data}
 
   varnames = ['mua', 'b1', 'b2', 'm', 'log_m_stddv']
-  param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b', v + '_c')]
   noncentered_parameterization = {p: 0. for p in param_names}
 
   make_to_centered = build_make_to_centered(
+      radon, model_args=model_args, observed_data=observed)
+  make_to_partially_noncentered = build_make_to_partially_noncentered(
       radon, model_args=model_args, observed_data=observed)
   to_centered = make_to_centered(**noncentered_parameterization)
   to_noncentered = make_to_noncentered(
       radon, model_args=model_args, observed_data=observed)
 
   return ModelConfig(radon, model_args, observed, to_centered, to_noncentered,
-                     make_to_centered)
+                     make_to_centered, make_to_partially_noncentered, None)
 
 
 def get_radon(state_code='MN'):
@@ -463,24 +842,24 @@ def get_radon(state_code='MN'):
   observed = {'y': data}
 
   varnames = ['mua', 'b1', 'b2', 'm']
-  param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b', v + '_c')]
   noncentered_parameterization = {p: 0. for p in param_names}
 
   make_to_centered = build_make_to_centered(
+      radon, model_args=model_args, observed_data=observed)
+  make_to_partially_noncentered = build_make_to_partially_noncentered(
       radon, model_args=model_args, observed_data=observed)
   to_centered = make_to_centered(**noncentered_parameterization)
   to_noncentered = make_to_noncentered(
       radon, model_args=model_args, observed_data=observed)
 
   return ModelConfig(radon, model_args, observed, to_centered, to_noncentered,
-                     make_to_centered)
+                     make_to_centered, make_to_partially_noncentered, None)
 
 
 def load_german_credit_data():
   """Load the German credit dataset."""
-  with open_from_url(
-   'https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data'  # pylint: disable=line-too-long
-  ) as f:
+  with open_data_file('german.data') as f:
     data = pd.read_csv(f, delim_whitespace=True, header=None)
 
   def categorical_to_int(x):
@@ -488,7 +867,8 @@ def load_german_credit_data():
     return np.array([d[i] for i in x])
 
   categoricals = []
-  numericals = [np.ones([len(data)])]
+  numericals = []
+  numericals.append(np.ones([len(data)]))
   for column in data.columns[:-1]:
     column = data[column]
     if column.dtype == 'O':
@@ -527,17 +907,20 @@ def get_german_credit_lognormalcentered():
   model_args = []
 
   varnames = ['overall_log_scale', 'beta_log_scales', 'beta']
-  param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b', v + '_c')]
   noncentered_parameterization = {p: 0. for p in param_names}
 
   make_to_centered = build_make_to_centered(
+      german_credit_model, model_args=model_args, observed_data=observed)
+  make_to_partially_noncentered = build_make_to_partially_noncentered(
       german_credit_model, model_args=model_args, observed_data=observed)
   to_centered = make_to_centered(**noncentered_parameterization)
   to_noncentered = make_to_noncentered(
       german_credit_model, model_args=model_args, observed_data=observed)
 
   return ModelConfig(german_credit_model, model_args, observed, to_centered,
-                     to_noncentered, make_to_centered)
+                     to_noncentered, make_to_centered,
+                     make_to_partially_noncentered, None)
 
 
 def get_german_credit_gammascale():
@@ -565,17 +948,20 @@ def get_german_credit_gammascale():
   model_args = []
 
   varnames = ['overall_log_scale', 'beta_log_scales', 'beta']
-  param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b', v + '_c')]
   noncentered_parameterization = {p: 0. for p in param_names}
 
   make_to_centered = build_make_to_centered(
+      german_credit_model, model_args=model_args, observed_data=observed)
+  make_to_partially_noncentered = build_make_to_partially_noncentered(
       german_credit_model, model_args=model_args, observed_data=observed)
   to_centered = make_to_centered(**noncentered_parameterization)
   to_noncentered = make_to_noncentered(
       german_credit_model, model_args=model_args, observed_data=observed)
 
   return ModelConfig(german_credit_model, model_args, observed, to_centered,
-                     to_noncentered, make_to_centered)
+                     to_noncentered, make_to_centered,
+                     make_to_partially_noncentered, None)
 
 
 def get_election():
@@ -606,17 +992,20 @@ def get_election():
   model_args = [N, n_state, black, female, state]
 
   varnames = ['mua', 'log_sigma_a', 'a', 'b1', 'b2']
-  param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b', v + '_c')]
   noncentered_parameterization = {p: 0. for p in param_names}
 
   make_to_centered = build_make_to_centered(
+      election, model_args=model_args, observed_data=observed)
+  make_to_partially_noncentered = build_make_to_partially_noncentered(
       election, model_args=model_args, observed_data=observed)
   to_centered = make_to_centered(**noncentered_parameterization)
   to_noncentered = make_to_noncentered(
       election, model_args=model_args, observed_data=observed)
 
   return ModelConfig(election, model_args, observed, to_centered,
-                     to_noncentered, make_to_centered)
+                     to_noncentered, make_to_centered,
+                     make_to_partially_noncentered, None)
 
 
 def get_electric():
@@ -661,17 +1050,20 @@ def get_electric():
   ]
 
   varnames = ['mua', 'a', 'b', 'sigma_y']
-  param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b', v + '_c')]
   noncentered_parameterization = {p: 0. for p in param_names}
 
   make_to_centered = build_make_to_centered(
+      electric_model, model_args=model_args, observed_data=observed)
+  make_to_partially_noncentered = build_make_to_partially_noncentered(
       electric_model, model_args=model_args, observed_data=observed)
   to_centered = make_to_centered(**noncentered_parameterization)
   to_noncentered = make_to_noncentered(
       electric_model, model_args=model_args, observed_data=observed)
 
   return ModelConfig(electric_model, model_args, observed, to_centered,
-                     to_noncentered, make_to_centered)
+                     to_noncentered, make_to_centered,
+                     make_to_partially_noncentered, None)
 
 
 def get_time_series():
@@ -733,14 +1125,51 @@ def get_time_series():
       'sigma_alpha',
       'sigma_mu',  # 'sigma_y'
   ] + ['alpha{}'.format(i) for i in range(T)] + ['mu{}'.format(i) for i in range(T)]
-  param_names = [p for v in varnames for p in (v + '_a', v + '_b')]
+  param_names = [p for v in varnames for p in (v + '_a', v + '_b', v + '_c')]
   noncentered_parameterization = {p: 0. for p in param_names}
 
   make_to_centered = build_make_to_centered(
+      time_series, model_args=model_args, observed_data=observed)
+  make_to_partially_noncentered = build_make_to_partially_noncentered(
       time_series, model_args=model_args, observed_data=observed)
   to_centered = make_to_centered(**noncentered_parameterization)
   to_noncentered = make_to_noncentered(
       time_series, model_args=model_args, observed_data=observed)
 
   return ModelConfig(time_series, model_args, observed, to_centered,
-                     to_noncentered, make_to_centered)
+                     to_noncentered, make_to_centered,
+                     make_to_partially_noncentered, None)
+
+
+def get_model_by_name(model, dataset=None):
+  if model == 'radon':
+    model_config = get_radon(state_code=dataset)
+  elif model == 'radon_stddvs':
+    model_config = get_radon_model_stddvs(state_code=dataset)
+  elif model == '8schools':
+    model_config = get_eight_schools()
+  elif model == 'german_credit_gammascale':
+    model_config = get_german_credit_gammascale()
+  elif model == 'german_credit_lognormalcentered':
+    model_config = get_german_credit_lognormalcentered()
+  elif model == 'gp_rhizoc':
+    model_config = get_gp_rhizoc()
+  elif model == 'gp_classification':
+    model_config = get_gp_classification(dataset)
+  elif model == 'gp_poisson':
+    model_config = get_gp_poisson(dataset)
+  elif model == 'gp_poisson_fixed':
+    model_config = get_gp_poisson_fixed()
+  elif model == 'election':
+    model_config = get_election()
+  elif model == 'electric':
+    model_config = get_electric()
+  elif model == 'police':
+    model_config = get_police()
+  elif model == 'time_series':
+    model_config = get_time_series()
+  elif model == 'neals_funnel':
+    model_config = get_neals_funnel()
+  else:
+    raise Exception('unknown model {}'.format(model))
+  return model_config

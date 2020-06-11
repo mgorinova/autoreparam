@@ -2,8 +2,10 @@ import numpy as np
 import os
 import json
 
-import tensorflow as tf
-flags = tf.app.flags
+from absl import app
+from absl import flags
+import tensorflow.compat.v1 as tf
+tf.disable_eager_execution()
 
 flags.DEFINE_boolean("elbos", default=False, help="")
 flags.DEFINE_boolean("ess", default=False, help="")
@@ -184,4 +186,4 @@ def main(_):
 
 
 if __name__ == "__main__":
-  tf.compat.v1.app.run()
+  app.run(main)

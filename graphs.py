@@ -1,14 +1,14 @@
 import collections
 import numpy as np
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 import tensorflow_probability as tfp
 from tensorflow_probability import edward2 as ed
 
-import util
+import util as util
 import program_transformations as ed_transforms
 
-FLAGS = tf.compat.v1.app.flags.FLAGS
+FLAGS = tf.app.flags.FLAGS
 
 
 def make_cp_graph(model_config):
@@ -19,17 +19,19 @@ def make_cp_graph(model_config):
 
   tf.compat.v1.reset_default_graph()
 
-  log_joint_centered = ed.make_log_joint_fn(model_config.model)
+  model = model_config.model
+  if model_config.bijectors_fn is not None:
+    model = ed_transforms.transform_with_bijectors(
+        model, model_config.bijectors_fn)
+
+  log_joint_centered = ed.make_log_joint_fn(model)
 
   with ed.tape() as model_tape:
-    _ = model_config.model(*model_config.model_args)
+    _ = model(*model_config.model_args)
 
-  param_shapes = collections.OrderedDict()
   target_cp_kwargs = {}
   for param in model_tape.keys():
-    if param not in model_config.observed_data.keys():
-      param_shapes[param] = model_tape[param].shape
-    else:
+    if param in model_config.observed_data.keys():
       target_cp_kwargs[param] = model_config.observed_data[param]
 
   def target_cp(*param_args):
@@ -42,7 +44,7 @@ def make_cp_graph(model_config):
     return log_joint_centered(*model_config.model_args, **target_cp_kwargs)
 
   elbo, variational_parameters = util.get_mean_field_elbo(
-      model_config.model,
+      model,
       target_cp,
       num_mc_samples=FLAGS.num_mc_samples,
       model_args=model_config.model_args,
@@ -65,17 +67,18 @@ def make_ncp_graph(model_config):
     with ed.interception(interceptor):
       return model_config.model(*params)
 
+  if model_config.bijectors_fn is not None:
+    model_ncp = ed_transforms.transform_with_bijectors(
+        model_ncp, model_config.bijectors_fn)
+
   log_joint_noncentered = ed.make_log_joint_fn(model_ncp)
 
   with ed.tape() as model_tape:
     _ = model_ncp(*model_config.model_args)
 
-  param_shapes = collections.OrderedDict()
   target_ncp_kwargs = {}
   for param in model_tape.keys():
-    if param not in model_config.observed_data.keys():
-      param_shapes[param] = model_tape[param].shape
-    else:
+    if param in model_config.observed_data.keys():
       target_ncp_kwargs[param] = model_config.observed_data[param]
 
   def target_ncp(*param_args):
@@ -119,17 +122,18 @@ def make_cvip_graph(model_config,
     with ed.interception(learnable_parametrisation):
       return model_config.model(*params)
 
+  if model_config.bijectors_fn is not None:
+    model_vip = ed_transforms.transform_with_bijectors(
+        model_vip, model_config.bijectors_fn)
+
   log_joint_vip = ed.make_log_joint_fn(model_vip)  # log_joint_fn
 
   with ed.tape() as model_tape:
     _ = model_vip(*model_config.model_args)
 
-  param_shapes = collections.OrderedDict()
   target_vip_kwargs = {}
   for param in model_tape.keys():
-    if param not in model_config.observed_data.keys():
-      param_shapes[param] = model_tape[param].shape
-    else:
+    if param in model_config.observed_data.keys():
       target_vip_kwargs[param] = model_config.observed_data[param]
 
   def target_vip(*param_args):  # latent_log_joint_fn
@@ -176,17 +180,18 @@ def make_dvip_graph(model_config, reparam, parameterisation_type='exp'):
     with ed.interception(insightful_parametrisation):
       return model_config.model(*params)
 
+  if model_config.bijectors_fn is not None:
+    model_vip = ed_transforms.transform_with_bijectors(
+        model_vip, model_config.bijectors_fn)
+
   log_joint_vip = ed.make_log_joint_fn(model_vip)  # log_joint_fn
 
   with ed.tape() as model_tape:
     _ = model_vip(*model_config.model_args)
 
-  param_shapes = collections.OrderedDict()
   target_vip_kwargs = {}
   for param in model_tape.keys():
-    if param not in model_config.observed_data.keys():
-      param_shapes[param] = model_tape[param].shape
-    else:
+    if param in model_config.observed_data.keys():
       target_vip_kwargs[param] = model_config.observed_data[param]
 
   def target_vip(*param_args):  # latent_log_joint_fn

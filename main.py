@@ -9,17 +9,23 @@ import time
 import collections
 from collections import OrderedDict
 
+from absl import app
+from absl import flags
+
 import io
 
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_eager_execution()
 import tensorflow_probability as tfp
 from tensorflow_probability import edward2 as ed
 
-import inference
-import graphs
-import models
-import util
+import inference as inference
+import graphs as graphs
+import models as models
+import util as util
+
+from tensorflow.python import debug as tf_debug
 
 import program_transformations as ed_transforms
 
@@ -28,14 +34,13 @@ from tensorflow.python.ops.parallel_for import pfor
 
 import json
 
-flags = tf.compat.v1.app.flags
-
 flags.DEFINE_string('model', default='8schools', help='Model to be used.')
 
 flags.DEFINE_string('dataset', default='', help='Dataset to be used.')
 
 flags.DEFINE_string(
-    'inference', default='VI', help='Inference method to be used: VI or HMC.')
+    'inference', default='VI',
+    help='Inference method to be used: VI, HMCtuning, or HMC.')
 
 flags.DEFINE_string(
     'method',
@@ -43,9 +48,9 @@ flags.DEFINE_string(
     help='Method to be used: CP, NCP, i (only if inference = HMC), cVIP, dVIP.')
 
 flags.DEFINE_string(
-    'learnable_parmeterisation_type',
-    default='exp',
-    help='Type of learnable parameterisation. Either `exp` or `scale`.')
+    'learnable_parameterisation_type',
+    default='eig',
+    help='Type of learnable parameterisation. One of "eig", "chol", "indep, "eigindep".')
 
 flags.DEFINE_boolean(
     'reparameterise_variational',
@@ -85,18 +90,16 @@ flags.DEFINE_integer(
 flags.DEFINE_integer(
     'num_leapfrog_steps', default=None, help='Number of leapfrog steps.')
 
-flags.DEFINE_list(
-    'num_leapfrog_steps_list',
-    default=[1, 2, 4, 8, 16, 32, 64, 128],
-    help='Number of leapfrog steps options.')
+flags.DEFINE_boolean(
+    'count_in_leapfrog_steps',
+    default=False,
+    help='If True, interpret num_samples, num_burnin_steps, '
+         'and num_adaptation_steps as referring to gradient evaluations '
+         'rather than full MH steps. (i.e., divide by the number of leapfrog '
+         'steps.')
 
 flags.DEFINE_integer(
     'num_samples', default=50000, help='Number of HMC samples.')
-
-flags.DEFINE_integer(
-    'num_tuning_samples',
-    default=10000,
-    help='Number of HMC samples to tune the chains.')
 
 flags.DEFINE_integer('num_chains', default=100, help='Number of HMC chains.')
 
@@ -106,7 +109,8 @@ flags.DEFINE_integer(
 flags.DEFINE_integer(
     'num_adaptation_steps', default=6000, help='Number of adaptation steps.')
 
-flags.DEFINE_string('f', default='', help='kernel')
+flags.DEFINE_integer(
+    'num_chains_to_save', default=0, help='Number of chains to save traces for.')
 
 FLAGS = flags.FLAGS
 
@@ -114,7 +118,7 @@ def create_target_graph(model_config, results_dir):
 
   cVIP_path = os.path.join(
     results_dir, 'cVIP_{}{}{}{}.json'.format(
-        FLAGS.learnable_parmeterisation_type,
+        FLAGS.learnable_parameterisation_type,
         '_tied' if FLAGS.tied_pparams else '',
         '_reparam_variational' if FLAGS.reparameterise_variational else '',
         '_discrete_prior' if FLAGS.discrete_prior else ''))
@@ -142,7 +146,7 @@ def create_target_graph(model_config, results_dir):
       (target, model, elbo, variational_parameters,
        learnable_parameters) = graphs.make_cvip_graph(
            model_config,
-           parameterisation_type=FLAGS.learnable_parmeterisation_type,
+           parameterisation_type=FLAGS.learnable_parameterisation_type,
            tied_pparams=FLAGS.tied_pparams)
     else:
       with tf.io.gfile.GFile(cVIP_path, 'r') as f:
@@ -153,7 +157,7 @@ def create_target_graph(model_config, results_dir):
          learnable_parameters) = graphs.make_dvip_graph(
              model_config,
              actual_reparam,
-             parameterisation_type=FLAGS.learnable_parmeterisation_type)
+             parameterisation_type=FLAGS.learnable_parameterisation_type)
 
   elif FLAGS.method == 'dVIP':
     if tf.io.gfile.exists(cVIP_path):
@@ -172,7 +176,7 @@ def create_target_graph(model_config, results_dir):
      learnable_parameters) = graphs.make_dvip_graph(
          model_config,
          discrete_parameterisation,
-         parameterisation_type=FLAGS.learnable_parmeterisation_type)
+         parameterisation_type=FLAGS.learnable_parameterisation_type)
     actual_reparam = discrete_parameterisation
 
   return (target,
@@ -183,49 +187,6 @@ def create_target_graph(model_config, results_dir):
           actual_reparam)
 
 
-def tune_leapfrog_steps(model_config, num_tuning_samples, initial_step_size,
-                        initial_states, results_dir):
-  util.print('Tuning number of leapfrog steps...')
-
-  num_samples_original = FLAGS.num_samples
-  FLAGS.num_samples = num_tuning_samples
-  max_nls = 1
-  max_nls_value = 0
-
-  for nls in FLAGS.num_leapfrog_steps_list:
-    util.print('\nTrying out {} leapfrog steps\n'.format(nls))
-    FLAGS.num_leapfrog_steps = nls
-
-    (target, model, elbo, variational_parameters,
-     learnable_parameters, actual_reparam) = create_target_graph(
-            model_config, results_dir)
-
-    (states_orig, kernel_results, states, ess) = inference.hmc(
-       target, model, model_config,
-       initial_step_size,
-       initial_states=initial_states,
-       reparam=actual_reparam)
-
-    init = tf.compat.v1.global_variables_initializer()
-    with tf.compat.v1.Session() as sess:
-
-      init.run()
-      ess_final = sess.run(ess)
-
-    # ess_final = [e / FLAGS.num_leapfrog_steps for e in ess_final]
-    ess_min, sem_min = util.get_min_ess(ess_final)
-    ess_min = ess_min / FLAGS.num_leapfrog_steps
-    sem_min = sem_min / FLAGS.num_leapfrog_steps
-
-    if ess_min > max_nls_value:
-      max_nls_value = ess_min
-      max_nls = nls
-
-  FLAGS.num_samples = num_samples_original
-
-  return max_nls
-
-
 def main(_):
 
   # tf.logging.set_verbosity(tf.logging.ERROR)
@@ -234,34 +195,7 @@ def main(_):
   util.print('Loading model {} with dataset {}.'.format(FLAGS.model,
                                                         FLAGS.dataset))
 
-  if FLAGS.model == 'radon':
-    model_config = models.get_radon(state_code=FLAGS.dataset)
-  elif FLAGS.model == 'radon_stddvs':
-    model_config = models.get_radon_model_stddvs(state_code=FLAGS.dataset)
-  elif FLAGS.model == '8schools':
-    model_config = models.get_eight_schools()
-  elif FLAGS.model == 'german_credit_gammascale':
-    model_config = models.get_german_credit_gammascale()
-    util.print('Warning! This model contains Gamma variables, which '
-               'causes problems with `parallel_for`.')
-  elif FLAGS.model == 'german_credit_lognormalcentered':
-    model_config = models.get_german_credit_lognormalcentered()
-  elif FLAGS.model == 'election':
-    model_config = models.get_election()
-  elif FLAGS.model == 'electric':
-    model_config = models.get_electric()
-  elif FLAGS.model == 'time_series':
-    model_config = models.get_time_series()
-  elif FLAGS.model == 'neals_funnel':
-    model_config = models.get_neals_funnel()
-  elif FLAGS.model == 'multivariate_simple':
-    model_config = models.get_multivariate_simple()
-  elif FLAGS.model == 'gp_classification':
-    model_config = models.get_gp_classification(FLAGS.dataset)
-  elif FLAGS.model == 'gp_poisson':
-    model_config = models.get_gp_poisson()
-  else:
-    raise Exception('unknown model {}'.format(FLAGS.model))
+  model_config = models.get_model_by_name(FLAGS.model, dataset=FLAGS.dataset)
 
   if FLAGS.results_dir == '':
     results_dir = FLAGS.model + '_' + FLAGS.dataset
@@ -274,7 +208,7 @@ def main(_):
   filename = '{}{}{}{}{}.json'.format(
       FLAGS.method,
       ('_' +
-       FLAGS.learnable_parmeterisation_type if 'VIP' in FLAGS.method else ''),
+       FLAGS.learnable_parameterisation_type if 'VIP' in FLAGS.method else ''),
       ('_tied'
        if FLAGS.tied_pparams else ''),
       ('_reparam_variational'
@@ -292,12 +226,14 @@ def main(_):
     if FLAGS.method == 'i':
       run_interleaved_hmc(model_config, results_dir, file_path)
     else:
-      run_hmc(model_config, results_dir, file_path)
+      run_hmc(model_config, results_dir, file_path, tuning=False)
+  elif FLAGS.inference == 'HMCtuning':
+      run_hmc(model_config, results_dir, file_path, tuning=True)
 
 
 def run_vi(model_config, results_dir, file_path):
   (target, model, elbo, variational_parameters, learnable_parameters,
-  actual_reparam) = create_target_graph(model_config, results_dir)
+   actual_reparam) = create_target_graph(model_config, results_dir)
 
   if tf.io.gfile.exists(file_path):
     util.print(
@@ -353,8 +289,11 @@ def run_vi(model_config, results_dir, file_path):
   with tf.io.gfile.GFile(file_path, 'w') as outfile:
     json.dump(results, outfile)
 
+def get_best_num_leapfrog_steps_from_tuning_runs(tuning_runs):
+  best_run = max(tuning_runs, key=lambda d: d['ess_min'])
+  return best_run['num_leapfrog_steps']
 
-def run_hmc(model_config, results_dir, file_path):
+def run_hmc(model_config, results_dir, file_path, tuning=False):
   if tf.io.gfile.exists(file_path):
     with tf.io.gfile.GFile(file_path, 'r') as f:
       prev_results = json.load(f)
@@ -368,46 +307,55 @@ def run_hmc(model_config, results_dir, file_path):
   ]
 
   initial_step_size = prev_results['initial_step_size']
-  num_ls = prev_results.get('num_leapfrog_steps', FLAGS.num_leapfrog_steps)
   initial_states = util.variational_inits_from_params(
       prev_results['learned_variational_params'],
       param_names=param_names,
       num_inits=FLAGS.num_chains).values()
 
-  if num_ls is None and FLAGS.num_leapfrog_steps is None:
-    num_ls = tune_leapfrog_steps(
-        model_config,
-        FLAGS.num_tuning_samples,
-        initial_step_size,
-        initial_states=initial_states,
-        results_dir=results_dir)
-  FLAGS.num_leapfrog_steps = num_ls
-  with tf.io.gfile.GFile(file_path, 'w') as f:
-    prev_results['num_leapfrog_steps'] = FLAGS.num_leapfrog_steps
-    json.dump(prev_results, f)
+  if tuning:
+    if not FLAGS.num_leapfrog_steps:
+      raise ValueError('You must specify the number of leapfrog steps for a '
+                       'tuning run.')
+    for existing_run in prev_results.get('tuning_runs', []):
+      if existing_run['num_leapfrog_steps'] == FLAGS.num_leapfrog_steps:
+        print('A tuning run already exists for HMC with {} leapfrog steps ',
+              'skipping. ({})'.format(FLAGS.num_leapfrog_steps, existing_run))
+        return
 
+  if not FLAGS.num_leapfrog_steps:
+    FLAGS.num_leapfrog_steps = get_best_num_leapfrog_steps_from_tuning_runs(
+        prev_results['tuning_runs'])
   util.print('\nNumber of leaprog steps is set to {}.\n'.format(
       FLAGS.num_leapfrog_steps))
 
-  (target, model, elbo, variational_parameters, learnable_parameters,
+  if FLAGS.count_in_leapfrog_steps:
+    FLAGS.num_samples = int(FLAGS.num_samples / float(FLAGS.num_leapfrog_steps))
+    FLAGS.num_burnin_steps = int(
+        FLAGS.num_burnin_steps / float(FLAGS.num_leapfrog_steps))
+    FLAGS.num_adaptation_steps = int(
+        FLAGS.num_adaptation_steps / float(FLAGS.num_leapfrog_steps))
+
+  (target, _, elbo, variational_parameters, learnable_parameters,
    actual_reparam) = create_target_graph(model_config, results_dir)
 
   (states_orig, kernel_results, states, ess) = inference.hmc(
-      target, model, model_config, initial_step_size,
+      target, model_config, initial_step_size,
       initial_states=initial_states,
       reparam=(actual_reparam
                if actual_reparam is not None
                else learned_reparam))
 
   init = tf.compat.v1.global_variables_initializer()
+
   with tf.compat.v1.Session() as sess:
+    #sess = tf_debug.LocalCLIDebugWrapperSession(
+    #    sess, dump_root="/usr/local/google/tmp/tfdbg")
 
     init.run()
-
     start_time = time.time()
-
     samples, is_accepted, ess_final, samples_orig = sess.run(
-        (states, kernel_results.inner_results.is_accepted, ess, states_orig))
+        (states, kernel_results.inner_results.is_accepted,
+         ess, states_orig))
 
     mcmc_time = time.time() - start_time
 
@@ -419,24 +367,35 @@ def run_hmc(model_config, results_dir, file_path):
   del ess_final
 
   ess_min, sem_min = util.get_min_ess(normalized_ess_final)
-  util.print('ESS: {} +/- {}'.format(ess_min, sem_min))
+  util.print('ESS per 1000 gradients: {} +/- {}'.format(ess_min, sem_min))
 
   acceptance_rate = (
       np.sum(is_accepted) * 100. / float(FLAGS.num_samples * FLAGS.num_chains))
 
-  save_hmc_results(
-      prev_results,
-      file_path=file_path,
-      ess_min=ess_min.item(),
-      sem_min=sem_min.item(),
-      acceptance_rate=acceptance_rate.item(),
-      mcmc_time_sec=mcmc_time)
+  if tuning:
+    save_hmc_results(
+        file_path=file_path,
+        tuning_runs={'num_leapfrog_steps': FLAGS.num_leapfrog_steps,
+                     'ess_min': ess_min.item(),
+                     'sem_min': sem_min.item(),
+                     'acceptance_rate': acceptance_rate.item(),
+                     'mcmc_time': mcmc_time,
+                     'num_samples': FLAGS.num_samples,
+                     'num_burnin_steps': FLAGS.num_burnin_steps})
+  else:
+    save_hmc_results(
+        file_path=file_path,
+        ess_min=ess_min.item(),
+        sem_min=sem_min.item(),
+        acceptance_rate=acceptance_rate.item(),
+        mcmc_time_sec=mcmc_time)
 
-  save_ess(
-      file_path_base=file_path[:-5],
-      samples=samples,
-      param_names=param_names,
-      normalized_ess_final=normalized_ess_final)
+    save_ess(
+        file_path_base=file_path[:-5],
+        samples=samples,
+        param_names=param_names,
+        normalized_ess_final=normalized_ess_final,
+        num_chains_to_save=FLAGS.num_chains_to_save)
 
 
 def run_interleaved_hmc_with_leapfrog_steps(
@@ -490,7 +449,6 @@ def run_interleaved_hmc_with_leapfrog_steps(
   return (ess_min, sem_min, acceptance_rate_cp, acceptance_rate_ncp, mcmc_time,
           samples, normalized_ess_final)
 
-
 def run_interleaved_hmc(model_config, results_dir, file_path):
   filename_cp = 'CP.json'
   filename_ncp = 'NCP.json'
@@ -508,13 +466,15 @@ def run_interleaved_hmc(model_config, results_dir, file_path):
     with tf.io.gfile.GFile(file_path_cp, 'r') as f:
       prev_results = json.load(f)
       initial_step_size_cp = prev_results['initial_step_size']
-      num_leapfrog_steps_cp = prev_results['num_leapfrog_steps']
+      num_leapfrog_steps_cp = get_best_num_leapfrog_steps_from_tuning_runs(
+          prev_results['tuning_runs'])
       learned_variational_params_cp = prev_results['learned_variational_params']
 
     with tf.io.gfile.GFile(file_path_ncp, 'r') as f:
       prev_results = json.load(f)
       initial_step_size_ncp = prev_results['initial_step_size']
-      num_leapfrog_steps_ncp = prev_results['num_leapfrog_steps']
+      num_leapfrog_steps_ncp = get_best_num_leapfrog_steps_from_tuning_runs(
+          prev_results['tuning_runs'])
   else:
     raise Exception('Run VI first to find initial step sizes, and HMC'
                     'first to find num_leapfrog_steps.')
@@ -528,7 +488,8 @@ def run_interleaved_hmc(model_config, results_dir, file_path):
   best_num_ls = None
   results = ()
   for num_ls in set([num_leapfrog_steps_ncp, num_leapfrog_steps_cp]):
-    util.print('\nNumber of leaprog steps is set to {}.\n'.format(num_ls))
+    util.print('\nNumber of leaprog steps is set to {}.\n'.format(
+        FLAGS.num_leapfrog_steps))
     FLAGS.num_leapfrog_steps = num_ls + num_ls
     (ess_min, sem_min, acceptance_rate_cp, acceptance_rate_ncp, mcmc_time,
      samples, normalized_ess_final) = run_interleaved_hmc_with_leapfrog_steps(
@@ -548,15 +509,11 @@ def run_interleaved_hmc(model_config, results_dir, file_path):
    samples, normalized_ess_final) = results
   FLAGS.num_leapfrog_steps = best_num_ls + best_num_ls
 
-  prev_results = {
-      'initial_step_size_ncp': initial_step_size_ncp,
-      'initial_step_size_cp': initial_step_size_cp,
-      'num_leapfrog_steps': best_num_ls
-  }
-
   save_hmc_results(
-      prev_results,
       file_path=file_path,
+      initial_step_size_ncp=initial_step_size_ncp,
+      initial_step_size_cp=nitial_step_size_cp,
+      num_leapfrog_steps=best_num_ls,
       ess_min=ess_min.item(),
       sem_min=sem_min.item(),
       acceptance_rate_cp=acceptance_rate_cp.item(),
@@ -567,10 +524,17 @@ def run_interleaved_hmc(model_config, results_dir, file_path):
       file_path_base=file_path[:-5],
       samples=samples,
       param_names=param_names,
-      normalized_ess_final=normalized_ess_final)
+      normalized_ess_final=normalized_ess_final,
+      num_chains_to_save=FLAGS.num_chains_to_save)
 
 
-def save_hmc_results(results, file_path, **kwargs):
+def save_hmc_results(file_path, **kwargs):
+
+  try:
+    with tf.io.gfile.GFile(file_path, 'r') as f:
+      results = json.load(f)
+  except IOError:
+    results = {}
 
   def init_results(list):
     for l in list:
@@ -585,7 +549,6 @@ def save_hmc_results(results, file_path, **kwargs):
   with tf.io.gfile.GFile(file_path, 'w') as outfile:
     json.dump(results, outfile)
 
-
 def save_ess(file_path_base,
              samples,
              normalized_ess_final,
@@ -597,13 +560,13 @@ def save_ess(file_path_base,
 
   # Work around issues saving np arrays directly to network
   # filesystems, by first saving to an in-memory IO buffer.
-  np_path = file_path_base + '_ess_{}.npz'.format(i)
+  np_path = file_path_base + '_ess.npz'
   with tf.io.gfile.GFile(np_path, 'wb') as out_f:
     io_buffer = io.BytesIO()
     np.savez(io_buffer, **dict_ess)
     out_f.write(io_buffer.getvalue())
 
-  txt_path = file_path_base + '_ess_{}.txt'.format(i)
+  txt_path = file_path_base + '_ess.txt'
   with tf.io.gfile.GFile(txt_path, 'w') as out_f:
     for k, v in dict_ess.items():
       out_f.write('{}: {}\n\n'.format(k, v))
@@ -615,7 +578,7 @@ def save_ess(file_path_base,
   if num_chains_to_save > 0:
     dict_res = dict([(param_names[i], samples[i][:, :num_chains_to_save])
                      for i in range(len(param_names))])
-    np_path = file_path_base + '{}.npz'.format(i)
+    np_path = file_path_base + '_traces.npz'
     with tf.io.gfile.GFile(np_path, 'wb') as out_f:
       io_buffer = io.BytesIO()
       np.savez(io_buffer, **dict_res)
@@ -623,4 +586,4 @@ def save_ess(file_path_base,
 
 
 if __name__ == '__main__':
-  tf.compat.v1.app.run()
+  app.run(main)

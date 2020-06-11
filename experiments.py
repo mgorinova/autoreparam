@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Implementations of the core algorithms."""
 # pylint: disable=missing-docstring,g-doc-args,g-doc-return-or-yield,g-short-docstring-punctuation,g-no-space-after-docstring-summary
 
@@ -25,7 +24,7 @@ import os
 import time
 
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 import tensorflow_probability as tfp
 from tensorflow_probability import edward2 as ed
 
@@ -36,63 +35,60 @@ import program_transformations as ed_transforms
 
 from tensorflow.python.ops.parallel_for import pfor
 
+
 def noop(x):
   return x
 
 
 def transform_mcmc_states(states, transform_fn, num_chains=1):
-	"""Apply a joint transformation to each of a set of MCMC samples.
+  """Apply a joint transformation to each of a set of MCMC samples.
 
-	Args:
-		states: list of `Tensors`, such as returned from `tfp.mcmc.sample_chain`,
-			where the `i`th element has shape `concat([[num_results], rv_shapes[i]])`, 
-			or shape `concat([[num_results], [num_chains], rv_shapes[i]])` if num_chains > 1.
-		transform_fn: callable that takes as argument a single state of the chain,
-			i.e., a list of `Tensors` where the `i`th element has shape `rv_shapes[i]`
-			representing a single rv value, and returns a transformed state, i.e., a
-			list of `Tensors` where the `i`th element has shape
-			`transformed_rv_shapes[i]`.
+  Args:
+    states: list of `Tensors`, such as returned from
+      `tfp.mcmc.sample_chain`, where the `i`th element has shape
+      `concat([[num_results], rv_shapes[i]])`, or shape
+      `concat([[num_results], [num_chains], rv_shapes[i]])` if
+      num_chains > 1.
+    transform_fn: callable that takes as argument a single state of
+      the chain, i.e., a list of `Tensors` where the `i`th element
+      has shape `rv_shapes[i]` representing a single rv value, and
+      returns a transformed state, i.e., a list of `Tensors` where
+      the `i`th element has shape `transformed_rv_shapes[i]`.
 
-	Returns:
-		transformed_states: list of `Tensors` representing samples from a
-			transformed model, where the `i`th element has shape
-			`concat([[num_results], transformed_rv_shapes[i]])`.
-	"""
+  Returns:
+    transformed_states: list of `Tensors` representing samples from
+    a transformed model, where the `i`th element has shape
+    `concat([[num_results], transformed_rv_shapes[i]])`.
+  """
 
-	num_samples = states[0].shape[0].value
+  num_samples = states[0].shape[0].value
 
-	#transformed_states = zip(*[
-	#		transform_fn([rv_states[sample_idx, Ellipsis]
-	#									for rv_states in states])
-	#		for sample_idx in range(num_samples)
-	#])
-	
-	def loop_body(sample_idx):
-		return transform_fn([ tf.gather(rv_states, sample_idx) for rv_states in states ])
+  def loop_body(sample_idx):
+    return transform_fn(
+        [tf.gather(rv_states, sample_idx) for rv_states in states])
 
-	
-	return pfor(loop_body, num_samples) # transformed_states =
-	
-	#print("Transf states: {}".format(transformed_states))
-	
-	#return [
-	#		tf.stack(transformed_rv_states)
-	#		for transformed_rv_states in transformed_states
-	#]
+  return pfor(loop_body, num_samples)  # transformed_states =
 
 
-def _run_hmc(target, param_shapes, transform=noop, step_size_init=0.1,
-             num_samples=2000, burnin=1000, num_adaptation_steps=500,
+def _run_hmc(target,
+             param_shapes,
+             transform=noop,
+             step_size_init=0.1,
+             num_samples=2000,
+             burnin=1000,
+             num_adaptation_steps=500,
              num_leapfrog_steps=4):
 
   g = tf.Graph()
   with g.as_default():
 
-    step_size = [tf.compat.v1.get_variable(
-        name='step_size'+str(i),
-        initializer=np.array(step_size_init[i], dtype=np.float32),
-        use_resource=True,  # For TFE compatibility.
-        trainable=False) for i in range(len(step_size_init))]
+    step_size = [
+        tf.compat.v1.get_variable(
+            name='step_size' + str(i),
+            initializer=np.array(step_size_init[i], dtype=np.float32),
+            use_resource=True,  # For TFE compatibility.
+            trainable=False) for i in range(len(step_size_init))
+    ]
 
     kernel = mcmc.HamiltonianMonteCarlo(
         target_log_prob_fn=target,
@@ -117,14 +113,12 @@ def _run_hmc(target, param_shapes, transform=noop, step_size_init=0.1,
     with tf.compat.v1.Session() as sess:
       init.run()
       start_time = time.time()
-      (orig_samples, samples,
-       is_accepted, ess,
-       final_step_size,
-       log_accept_ratio) = sess.run([states, tr_states,
-                                     kernel_results.is_accepted,
-                                     ess_op,
-                                     kernel_results.extra.step_size_assign,
-                                     kernel_results.log_accept_ratio])
+      (orig_samples, samples, is_accepted, ess, final_step_size,
+       log_accept_ratio) = sess.run([
+           states, tr_states, kernel_results.is_accepted, ess_op,
+           kernel_results.extra.step_size_assign,
+           kernel_results.log_accept_ratio
+       ])
       sampling_time = time.time() - start_time
 
     results = collections.OrderedDict()
@@ -146,8 +140,11 @@ def _run_hmc(target, param_shapes, transform=noop, step_size_init=0.1,
     return results
 
 
-def _run_hmc_interleaved(target_cp, target_ncp, param_shapes,
-                         step_size_cp=0.1, step_size_ncp=0.1,
+def _run_hmc_interleaved(target_cp,
+                         target_ncp,
+                         param_shapes,
+                         step_size_cp=0.1,
+                         step_size_ncp=0.1,
                          to_centered=noop,
                          to_noncentered=noop,
                          num_samples=2000,
@@ -167,10 +164,8 @@ def _run_hmc_interleaved(target_cp, target_ncp, param_shapes,
         step_size=step_size_ncp,
         num_leapfrog_steps=num_leapfrog_steps)
 
-    kernel = interleaved.Interleaved(inner_kernel_cp,
-                                     inner_kernel_ncp,
-                                     to_centered,
-                                     to_noncentered)
+    kernel = interleaved.Interleaved(inner_kernel_cp, inner_kernel_ncp,
+                                     to_centered, to_noncentered)
 
     states, kernel_results = mcmc.sample_chain(
         num_results=num_samples,
@@ -243,16 +238,19 @@ def run_centered_hmc(model_config,
   stepsize_kwargs = {'num_optimization_steps': num_optimization_steps}
   for key in model_config.observed_data:
     stepsize_kwargs[key] = model_config.observed_data[key]
-  (step_size_init_cp,
-   stepsize_elbo_cp, vi_time) = util.approximate_mcmc_step_size(
-       model_config.model, *model_config.model_args, **stepsize_kwargs)
+  (step_size_init_cp, stepsize_elbo_cp,
+   vi_time) = util.approximate_mcmc_step_size(model_config.model,
+                                              *model_config.model_args,
+                                              **stepsize_kwargs)
 
-  results = _run_hmc(target_cp, param_shapes,
-                     step_size_init=step_size_init_cp,
-                     num_samples=num_samples,
-                     burnin=burnin,
-                     num_adaptation_steps=num_adaptation_steps,
-                     num_leapfrog_steps=num_leapfrog_steps)
+  results = _run_hmc(
+      target_cp,
+      param_shapes,
+      step_size_init=step_size_init_cp,
+      num_samples=num_samples,
+      burnin=burnin,
+      num_adaptation_steps=num_adaptation_steps,
+      num_leapfrog_steps=num_leapfrog_steps)
 
   results['elbo'] = stepsize_elbo_cp
   results['vi_time'] = vi_time
@@ -266,6 +264,7 @@ def run_noncentered_hmc(model_config,
                         num_adaptation_steps=500,
                         num_optimization_steps=2000):
   """Given a (centred) model, this function transforms it to a fully non-centred
+
   one, and runs HMC on the reparametrised model.
   """
 
@@ -289,6 +288,7 @@ def run_parametrised_hmc(model_config,
                          num_adaptation_steps=500,
                          num_optimization_steps=2000):
   """Given a (centred) model, this function transforms it based on the provided
+
   interceptor, and runs HMC on the reparameterised model.
   """
 
@@ -322,18 +322,20 @@ def run_parametrised_hmc(model_config,
   stepsize_kwargs = {'num_optimization_steps': num_optimization_steps}
   for key in model_config.observed_data:
     stepsize_kwargs[key] = model_config.observed_data[key]
-  (step_size_init_ncp,
-   stepsize_elbo_ncp,
-   vi_time) = util.approximate_mcmc_step_size(
-       model_ncp, *model_config.model_args, **stepsize_kwargs)
+  (step_size_init_ncp, stepsize_elbo_ncp,
+   vi_time) = util.approximate_mcmc_step_size(model_ncp,
+                                              *model_config.model_args,
+                                              **stepsize_kwargs)
 
-  results = _run_hmc(target_ncp, param_shapes,
-                     step_size_init=step_size_init_ncp,
-                     transform=model_config.to_centered,
-                     num_samples=num_samples,
-                     burnin=burnin,
-                     num_adaptation_steps=num_adaptation_steps,
-                     num_leapfrog_steps=num_leapfrog_steps)
+  results = _run_hmc(
+      target_ncp,
+      param_shapes,
+      step_size_init=step_size_init_ncp,
+      transform=model_config.to_centered,
+      num_samples=num_samples,
+      burnin=burnin,
+      num_adaptation_steps=num_adaptation_steps,
+      num_leapfrog_steps=num_leapfrog_steps)
 
   results['elbo'] = stepsize_elbo_ncp
   results['vi_time'] = vi_time
@@ -341,9 +343,13 @@ def run_parametrised_hmc(model_config,
 
 
 def run_interleaved_hmc(model_config,
-                        num_samples=2000, step_size_cp=0.1, step_size_ncp=0.1,
-                        burnin=1000, num_leapfrog_steps=4):
+                        num_samples=2000,
+                        step_size_cp=0.1,
+                        step_size_ncp=0.1,
+                        burnin=1000,
+                        num_leapfrog_steps=4):
   """Given a (centred) model, this function transforms it to a fully
+
   non-centred one, and uses both models to run interleaved HMC.
   """
 
@@ -397,14 +403,17 @@ def run_interleaved_hmc(model_config,
 
     return log_joint_noncentered(*model_config.model_args, **target_ncp_kwargs)
 
-  return _run_hmc_interleaved(target_cp, target_ncp, param_shapes,
-                              to_centered=model_config.to_centered,
-                              to_noncentered=model_config.to_noncentered,
-                              num_samples=num_samples,
-                              step_size_cp=step_size_cp,
-                              step_size_ncp=step_size_ncp,
-                              burnin=burnin,
-                              num_leapfrog_steps=num_leapfrog_steps)
+  return _run_hmc_interleaved(
+      target_cp,
+      target_ncp,
+      param_shapes,
+      to_centered=model_config.to_centered,
+      to_noncentered=model_config.to_noncentered,
+      num_samples=num_samples,
+      step_size_cp=step_size_cp,
+      step_size_ncp=step_size_ncp,
+      burnin=burnin,
+      num_leapfrog_steps=num_leapfrog_steps)
 
 
 def gen_id():
@@ -435,8 +444,8 @@ def run_vip_hmc_continuous(model_config,
   init_val_loc = tf.compat.v1.placeholder('float', shape=())
   init_val_scale = tf.compat.v1.placeholder('float', shape=())
 
-  (learnable_parameters,
-   learnable_parametrisation, _) = ed_transforms.make_learnable_parametrisation(
+  (learnable_parameters, learnable_parametrisation,
+   _) = ed_transforms.make_learnable_parametrisation(
        init_val_loc=init_val_loc, init_val_scale=init_val_scale, tau=tau)
 
   def model_vip(*params):
@@ -471,9 +480,7 @@ def run_vip_hmc_continuous(model_config,
 
   if use_iaf_posterior:
     elbo = util.get_iaf_elbo(
-        target_vip,
-        num_mc_samples=num_mc_samples,
-        param_shapes=param_shapes)
+        target_vip, num_mc_samples=num_mc_samples, param_shapes=param_shapes)
     variational_parameters = {}
   else:
     elbo, variational_parameters = util.get_mean_field_elbo(
@@ -523,9 +530,12 @@ def run_vip_hmc_continuous(model_config,
 
         with tf.compat.v1.Session() as sess:
 
-          init.run(feed_dict={init_val_loc: init_loc,
-                              init_val_scale: init_scale,
-                              learning_rate_ph: learning_rate_val})
+          init.run(
+              feed_dict={
+                  init_val_loc: init_loc,
+                  init_val_scale: init_scale,
+                  learning_rate_ph: learning_rate_val
+              })
 
           this_timeline = []
           for i in range(num_optimization_steps):
@@ -581,11 +591,13 @@ def run_vip_hmc_continuous(model_config,
 
       vip_step_size_init = sess.run(vip_step_size_approx)
 
-      vip_step_size = [tf.compat.v1.get_variable(
-          name='step_size_vip'+str(i),
-          initializer=np.array(vip_step_size_init[i], dtype=np.float32),
-          use_resource=True,  # For TFE compatibility.
-          trainable=False) for i in range(len(vip_step_size_init))]
+      vip_step_size = [
+          tf.compat.v1.get_variable(
+              name='step_size_vip' + str(i),
+              initializer=np.array(vip_step_size_init[i], dtype=np.float32),
+              use_resource=True,  # For TFE compatibility.
+              trainable=False) for i in range(len(vip_step_size_init))
+      ]
 
       kernel_vip = mcmc.HamiltonianMonteCarlo(
           target_log_prob_fn=target_vip,
@@ -606,9 +618,12 @@ def run_vip_hmc_continuous(model_config,
       states_vip = transform_mcmc_states(states, to_centered)
 
       init_again = tf.compat.v1.global_variables_initializer()
-      init_again.run(feed_dict={
-          init_val_loc: best_init_loc, init_val_scale: best_init_scale,
-          learning_rate_ph: 1.0})  # learning rate doesn't matter for HMC.
+      init_again.run(
+          feed_dict={
+              init_val_loc: best_init_loc,
+              init_val_scale: best_init_scale,
+              learning_rate_ph: 1.0
+          })  # learning rate doesn't matter for HMC.
 
       ess_vip = tfp.mcmc.effective_sample_size(states_vip)
 
@@ -656,6 +671,7 @@ def run_vip_hmc_continuous(model_config,
 
     return results
 
+
 ##############################################################################
 
 
@@ -669,8 +685,7 @@ def run_vip_hmc_discrete(model_config,
 
   tf.compat.v1.reset_default_graph()
 
-  (_,
-   insightful_parametrisation,
+  (_, insightful_parametrisation,
    _) = ed_transforms.make_learnable_parametrisation(
        learnable_parameters=parameterisation)
 

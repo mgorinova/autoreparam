@@ -22,7 +22,7 @@ from __future__ import print_function
 import collections
 import warnings
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 import tensorflow_probability as tfp
 
 from tensorflow_probability.python.mcmc import TransitionKernel
@@ -61,9 +61,7 @@ class Interleaved(TransitionKernel):
                seed=None,
                name=None):
 
-    self._seed_stream = tfp.distributions.SeedStream(seed,
-                                                     'interleaved_one_step')
-
+    self._seed_stream = tfp.util.SeedStream(seed, 'interleaved_one_step')
 
     # Support SimpleStepSizeAdaptation wrappers.
     _seed = lambda k: k.inner_kernel.seed if hasattr(k, 'inner_kernel'
@@ -128,9 +126,11 @@ class Interleaved(TransitionKernel):
       [next_cp_state, kernel_res_cp
       ] = self.inner_kernel['cp'].one_step(current_state, cp_results)
 
+      print("CALLING TO_NCP")
       current_ncp_state = self.to_ncp(next_cp_state)
       for i in range(len(current_ncp_state)):
         current_ncp_state[i] = tf.identity(current_ncp_state[i])
+      print("DONE WITH TO_NCP")
 
       # Recompute log prob at new state by bootstrapping
       ncp_results = previous_kernel_results.ncp_results
@@ -161,8 +161,9 @@ class Interleaved(TransitionKernel):
         values=[init_state]):
 
       if ncp_results is None:
-        ncp_results = self.inner_kernel['ncp'].bootstrap_results(
-            self.to_ncp(init_state))
+        ncp_state = tf.nest.map_structure(tf.stop_gradient,
+                                          self.to_ncp(init_state))
+        ncp_results = self.inner_kernel['ncp'].bootstrap_results(ncp_state)
       if cp_results is None:
         cp_results = self.inner_kernel['cp'].bootstrap_results(init_state)
       return InterleavedKernelResults(

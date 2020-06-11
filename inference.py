@@ -3,22 +3,24 @@ from __future__ import division
 from __future__ import print_function
 
 import collections
+import io
 import os
+import time
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 import tensorflow_probability as tfp
 from tensorflow_probability import edward2 as ed
 import numpy as np
 
-import util
-import interleaved
+import util as util
+import interleaved as interleaved
 
 from tensorflow_probability.python import mcmc
 from tensorflow.python.ops.parallel_for import pfor
 
 from tensorflow.python.framework import smart_cond
 
-FLAGS = tf.compat.v1.app.flags.FLAGS
+FLAGS = tf.app.flags.FLAGS
 
 
 def find_best_learning_rate(elbo,
@@ -31,7 +33,7 @@ def find_best_learning_rate(elbo,
                 information regarding the best optimisation find.
                 If `learnable_parameters` is given, it also returns the
                 best parameterisation for the model.
-        """
+  """
   best_timeline = []
   best_elbo_with_prior = None
   best_prior_logp = None
@@ -51,7 +53,17 @@ def find_best_learning_rate(elbo,
                       for param in learnable_parameters.values()])
   elbo_with_prior = elbo + prior_logp
 
-  train = optimizer.minimize(-elbo_with_prior)
+  variables = tf.global_variables()
+  grads = tf.gradients(-elbo_with_prior, variables)
+  for var, grad in zip(variables, grads):
+    if grad is None:
+      print("None gradient for {}".format(var.name))
+  grads = [g for g in grads if g is not None]
+  remove_nans = lambda x: tf.where(tf.is_nan(x), tf.zeros_like(x), x)
+  grads_and_vars = [(remove_nans(grad), var)
+                    for (grad, var) in zip(grads, variables)
+                    if grad is not None]
+  train = optimizer.apply_gradients(grads_and_vars)
   init = tf.compat.v1.global_variables_initializer()
 
   def get_learning_rate(step, base_learning_rate):
@@ -62,7 +74,11 @@ def find_best_learning_rate(elbo,
     else:
       return base_learning_rate
 
-  for learning_rate_val in FLAGS.learning_rates:
+  if learnable_parameters is None:
+    learnable_parameters = {}
+
+  for learning_rate_val_str in FLAGS.learning_rates:
+    learning_rate_val = float(learning_rate_val_str)
     with tf.compat.v1.Session() as sess:
 
       feed_dict = {learning_rate_ph: learning_rate_val}
@@ -71,12 +87,36 @@ def find_best_learning_rate(elbo,
       elbo_with_prior_timeline = []
       prior_logp_timeline = []
 
-      for step in range(FLAGS.num_optimization_steps):
-        _, e, plp = sess.run([train, elbo_with_prior, prior_logp],
-                             feed_dict={learning_rate: get_learning_rate(
-                                 step, learning_rate_val)})
+      step = 0
+      while step < FLAGS.num_optimization_steps:
+        try:
+          _, grads_, gradvals, e, plp, posterior_params, param_params = sess.run(
+              (train, grads, grads_and_vars, elbo_with_prior, prior_logp,
+               variational_parameters, learnable_parameters),
+              feed_dict={learning_rate: get_learning_rate(
+                  step, learning_rate_val)})
+        except Exception as err:
+          print("Exception in optimization step:", err)
+          for pname2, pval2 in posterior_params.items():
+            print('  {}: {}'.format(pname2, pval2))
+          for ppname, ppval in param_params.items():
+            print('  {}: {}'.format(ppname, ppval))
+
         elbo_with_prior_timeline.append(e)
         prior_logp_timeline.append(plp)
+        if step % 100 == 0:
+          print('step {} elbo {}'.format(step, e))
+          for pname, pval in posterior_params.items():
+            if pval.size < 10:
+              print('  {}: {}'.format(pname, pval))
+          gradvals = {var.name: grad
+                      for (var, grad) in zip(variables, gradvals)}
+          results = {'grad_' + k: v for (k, v) in gradvals.items()}
+          results.update(posterior_params)
+          results.update(param_params)
+          results['elbo'] = e
+          results['step'] = step
+        step += 1
 
       this_elbo_with_prior = np.mean(elbo_with_prior_timeline[-32:])
       this_prior_logp = np.mean(prior_logp_timeline[-32:])
@@ -145,14 +185,17 @@ def vectorize_log_joint_fn(log_joint_fn):
       sliced_kwargs = {k: tf.gather(v, i) for k, v in kwargs.items()}
       return log_joint_fn(*sliced_args, **sliced_kwargs)
 
-    result = pfor(loop_body, num_inputs)
-    result.set_shape([num_inputs])
+    if num_inputs == 1:
+      result = tf.expand_dims(loop_body(0), 0)
+    else:
+      result = pfor(loop_body, num_inputs)
+      result.set_shape([num_inputs])
     return result
 
   return vectorized_log_joint_fn
 
 
-def hmc(target, model, model_config, step_size_init, initial_states, reparam):
+def hmc(target, model_config, step_size_init, initial_states, reparam):
   """Runs HMC to sample from the given target distribution."""
   if reparam == 'CP':
     to_centered = lambda x: x
@@ -164,32 +207,36 @@ def hmc(target, model, model_config, step_size_init, initial_states, reparam):
   model_config = model_config._replace(to_centered=to_centered)
 
   initial_states = list(initial_states)  # Variational samples.
-  shapes = [s[0].shape for s in initial_states]
-
   vectorized_target = vectorize_log_joint_fn(target)
 
   per_chain_initial_step_sizes = [
       np.array(step_size_init[i] * np.ones(initial_states[i].shape) /
-               (FLAGS.num_leapfrog_steps / 4.)**2).astype(np.float32)
+               (float(FLAGS.num_leapfrog_steps) / 4.)**2).astype(np.float32)
       for i in range(len(step_size_init))
   ]
 
-  kernel = mcmc.SimpleStepSizeAdaptation(
-      inner_kernel=mcmc.HamiltonianMonteCarlo(
-          target_log_prob_fn=vectorized_target,
-          step_size=per_chain_initial_step_sizes,
-          num_leapfrog_steps=FLAGS.num_leapfrog_steps),
-      adaptation_rate=0.05,
+  inner_kernel = mcmc.HamiltonianMonteCarlo(
+      target_log_prob_fn=vectorized_target,
+      step_size=per_chain_initial_step_sizes,
+      state_gradients_are_stopped=True,
+      num_leapfrog_steps=FLAGS.num_leapfrog_steps)
+
+  kernel = mcmc.DualAveragingStepSizeAdaptation(
+      inner_kernel=inner_kernel,
       num_adaptation_steps=FLAGS.num_adaptation_steps)
 
-  states_orig, kernel_results = mcmc.sample_chain(
-      num_results=FLAGS.num_samples,
-      num_burnin_steps=FLAGS.num_burnin_steps,
-      current_state=initial_states,
-      kernel=kernel,
-      num_steps_between_results=1)
+  def do_sampling():
+    return mcmc.sample_chain(
+        num_results=FLAGS.num_samples,
+        num_burnin_steps=FLAGS.num_burnin_steps,
+        current_state=initial_states,
+        kernel=kernel,
+        num_steps_between_results=1)
 
-  states_transformed = transform_mcmc_states(states_orig, to_centered)
+  states_orig, kernel_results = tf.xla.experimental.compile(do_sampling)
+
+  states_transformed = tf.xla.experimental.compile(
+      lambda states: transform_mcmc_states(states, to_centered), [states_orig])
   ess = tfp.mcmc.effective_sample_size(states_transformed)
 
   return states_orig, kernel_results, states_transformed, ess
@@ -242,7 +289,8 @@ def hmc_interleaved(model_config, target_cp, target_ncp, num_leapfrog_steps_cp,
       inner_kernel=mcmc.HamiltonianMonteCarlo(
           target_log_prob_fn=vectorized_target_cp,
           step_size=cp_step_sizes,
-          num_leapfrog_steps=num_leapfrog_steps_cp),
+          num_leapfrog_steps=num_leapfrog_steps_cp,
+          state_gradients_are_stopped=True),
       adaptation_rate=0.05,
       target_accept_prob=0.75,
       num_adaptation_steps=FLAGS.num_adaptation_steps)
@@ -251,7 +299,8 @@ def hmc_interleaved(model_config, target_cp, target_ncp, num_leapfrog_steps_cp,
       inner_kernel=mcmc.HamiltonianMonteCarlo(
           target_log_prob_fn=vectorized_target_ncp,
           step_size=ncp_step_sizes,
-          num_leapfrog_steps=num_leapfrog_steps_ncp),
+          num_leapfrog_steps=num_leapfrog_steps_ncp,
+          state_gradients_are_stopped=True),
       adaptation_rate=0.05,
       target_accept_prob=0.75,
       num_adaptation_steps=FLAGS.num_adaptation_steps)
@@ -263,12 +312,17 @@ def hmc_interleaved(model_config, target_cp, target_ncp, num_leapfrog_steps_cp,
                                    vectorise_transform(to_centered),
                                    vectorise_transform(to_noncentered))
 
-  states, kernel_results = mcmc.sample_chain(
-      num_results=FLAGS.num_samples,
-      num_burnin_steps=FLAGS.num_burnin_steps,
-      current_state=initial_states,
-      kernel=kernel,
-      num_steps_between_results=1)
+  def do_sampling():
+    return mcmc.sample_chain(
+        num_results=FLAGS.num_samples,
+        num_burnin_steps=FLAGS.num_burnin_steps,
+        current_state=initial_states,
+        kernel=kernel,
+        num_steps_between_results=1)
+
+  # Compiling the sampler speeds up inference, and suppresses errors from
+  # invalid matrix decompositions (which instead become NaNs -> rejected).
+  states, kernel_results = tf.xla.experimental.compile(do_sampling)
 
   ess = tfp.mcmc.effective_sample_size(states)
 
@@ -289,7 +343,14 @@ def transform_mcmc_states(states, transform_fn):
           tf.gather(tf.gather(rv_states, sample_idx), chain_idx)
           for rv_states in states
       ])
+    if num_chains == 1:
+      return tf.nest.map_structure(lambda x: tf.expand_dims(x, 0),
+                                   loop_body_chain(0))
 
     return pfor(loop_body_chain, num_chains)
+
+  if num_samples == 1:
+    return tf.nest.map_structure(lambda x: tf.expand_dims(x, 0),
+                                 loop_body(0))
 
   return pfor(loop_body, num_samples)
