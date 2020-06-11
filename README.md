@@ -11,7 +11,7 @@ The script `main.py` is the main entry point. For example, to evaluate the Germa
 
 ```shell
 # Run variational inference to get step sizes and initialization.
-python main.py --model=german_credit_lognormalcentered --inference=VI --method=CP --num_optimisation_steps=3000 --results_dir=./results/
+python main.py --model=german_credit_lognormalcentered --inference=VI --method=CP --num_optimization_steps=3000 --results_dir=./results/
 # Run HMC to sample from the posterior
 python main.py --model=german_credit_lognormalcentered --inference=HMC --method=CP --num_leapfrog_steps=4 --num_samples=50000 --burnin=10000 --num_adaptation_steps=6000 --results_dir=./results/
 ```

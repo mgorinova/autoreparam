@@ -205,12 +205,12 @@ def make_variational_model(model, *args, **kwargs):
     else:
       # shape must not be None
       variational_parameters[loc_name] = \
-          tf.compat.v1.get_variable(
+          tf.get_variable(
               name=loc_name,
               initializer=1e-2 * tf.random.normal(shape, dtype=tf.float32))
 
       variational_parameters[scale_name] = tf.nn.softplus(
-          tf.compat.v1.get_variable(
+          tf.get_variable(
               name=scale_name,
               initializer=-2 * tf.ones(shape, dtype=tf.float32)))
       return (variational_parameters[loc_name],
@@ -505,7 +505,7 @@ def make_learnable_parametrisation(init_val_loc=0.,
                             name, learnable_parameters))
 
       learnable_parameters[loc_name] = tf.sigmoid(
-          tau * tf.compat.v1.get_variable(
+          tau * tf.get_variable(
               name=loc_name + '_unconstrained',
               initializer=tf.ones(loc_shape) * init_val_loc))
 
@@ -517,14 +517,14 @@ def make_learnable_parametrisation(init_val_loc=0.,
         if (('eig' in parameterisation_type) or
             ('chol' in parameterisation_type) or
             ('scalar' in parameterisation_type)):
-          scale_param = tf.sigmoid(tau * tf.compat.v1.get_variable(
+          scale_param = tf.sigmoid(tau * tf.get_variable(
               name=scale_name + '_unconstrained',
               initializer=tf.ones(scale_shape) * init_val_scale))
           learnable_parameters[scale_name] = scale_param
 
         if 'indep' in parameterisation_type:
           alternate_param = 1e-4 + tf.nn.softplus(
-              tf.compat.v1.get_variable(
+              tf.get_variable(
                   name=alternate_scale_name + '_unconstrained',
                   initializer=tf.ones(scale_shape)))
           learnable_parameters[alternate_scale_name] = alternate_param

@@ -17,7 +17,7 @@ def make_cp_graph(model_config):
                 Resets the default TF graph.
         """
 
-  tf.compat.v1.reset_default_graph()
+  tf.reset_default_graph()
 
   model = model_config.model
   if model_config.bijectors_fn is not None:
@@ -59,7 +59,7 @@ def make_ncp_graph(model_config):
                 Constructs the CP graph of the given model.
                 Resets the default TF graph.
         """
-  tf.compat.v1.reset_default_graph()
+  tf.reset_default_graph()
 
   interceptor = ed_transforms.ncp
 
@@ -109,7 +109,7 @@ def make_cvip_graph(model_config,
                 Resets the default TF graph.
         """
 
-  tf.compat.v1.reset_default_graph()
+  tf.reset_default_graph()
 
   results = collections.OrderedDict()
 
@@ -169,7 +169,7 @@ def make_dvip_graph(model_config, reparam, parameterisation_type='exp'):
                 Resets the default TF graph.
         """
 
-  tf.compat.v1.reset_default_graph()
+  tf.reset_default_graph()
 
   results = collections.OrderedDict()
 
